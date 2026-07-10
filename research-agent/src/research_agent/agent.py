@@ -161,6 +161,7 @@ Respond in Chinese. After your response, append:
 
 def after_response(state: AgentState) -> str:
     if not state.retrieval_sufficient and state.retry_count < 3:
+        state.retry_count += 1
         return "reasoner"
     if state.error:
         state.retry_count += 1

@@ -6,9 +6,6 @@ def evaluate_retrieval_sufficiency(state: AgentState) -> bool:
     chunks = state.retrieved_chunks
     if not chunks:
         return False
-    high_score = [c for c in chunks if c.get("score", 0) > 0.5]
-    if len(high_score) < 1:
-        return False
     return True
 
 
