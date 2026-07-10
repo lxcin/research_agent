@@ -428,50 +428,155 @@ Agent 启动
 
 ---
 
-### 模块 E：Skill/MCP 插件系统
+### 模块 E：Skill + MCP 插件系统
 
-**概述**：所有非核心对话的复杂工作流统一通过 Skill+MCP 机制实现。
+**概述**：Agent 能力扩展的双通道——Skill（工作流编排）和 MCP（外部工具集成）。Skill 定义"做什么、怎么做"，MCP 提供"能调什么工具"。Agent 启动时自动连接已配置的 MCP server，发现可用工具；Skill 可在工作流中调用 MCP 工具。
 
-#### E1. V1 内置 Skill
+#### E1. MCP 集成（模型上下文协议）
 
-| Skill                 | 核心能力                                                |
-| --------------------- | --------------------------------------------------- |
-| **literature-review** | 根据知识积累生成综述大纲 → 逐节写初稿（带引用）→ 引用自检 → 输出 Markdown/LaTeX |
-| **experiment-runner** | 检索实验范式 → 生成实验方案 → 通过 MCP 连接计算资源执行 → 异常检测 → 结果分析     |
-| **paper-search**      | 通过 MCP 连接 Semantic Scholar / ArXiv API 检索新论文，摄入知识库  |
-| **write-report**      | 整合全部项目数据 + 实验结果 + 图谱知识 → 生成正式研究报告                   |
+**MCP 协议遵循**：agent 通过标准 MCP 协议（JSON-RPC over stdio/HTTP）连接 MCP server，自动发现 tools/resources/prompts 列表。
 
-#### E2. Skill 定义
+**配置文件**：`~/research-agent-data/mcp_servers.yml`
 
-| 字段            | 说明                        |
-| ------------- | ------------------------- |
-| name          | 唯一标识                      |
-| description   | 给 Agent 的语义描述，用于自动判断是否触发  |
-| trigger       | 关键词列表 / 手动命令 / Agent 自动判断 |
-| system_prompt | 该 Skill 专用的系统指令           |
-| tools         | 该 Skill 需要的 MCP 工具列表      |
-| workflow      | 步骤定义（Agent 参考而非硬编码执行）     |
+```yaml
+servers:
+  - name: "semantic-scholar"
+    command: "npx"
+    args: ["-y", "@anthropic/mcp-server-semantic-scholar"]
+  - name: "python-executor"
+    command: "python"
+    args: ["-m", "mcp_server_python"]
+  - name: "filesystem"
+    command: "npx"
+    args: ["-y", "@anthropic/mcp-server-filesystem"]
+```
 
-#### E3. Skill 执行流程
+**生命周期**：
+
+```
+Agent 启动
+    ↓
+读取 mcp_servers.yml → 逐个启动 MCP server 子进程
+    ↓
+每个 server 发送 initialize → tools/list → 获取可用工具列表
+    ↓
+工具注册到 Agent 的工具目录（tools registry）
+    ↓
+Agent 运行时：当 LLM 决定调用工具时 → tools/call → 返回结果
+    ↓
+Agent 退出 → 关闭所有 MCP server 子进程
+```
+
+**安全约束**：
+
+| 规则 | 说明 |
+|------|------|
+| MCP server 仅允许本地 stdio 连接（不暴露网络端口） |
+| 首次连接新 server → 用户确认授权 |
+| 工具调用涉及文件写入/网络请求 → 预览确认 |
+| 工具调用结果超 10000 token → 截断并标记 |
+| 禁止执行系统命令（shell、rm -rf 等） |
+| MCP server 超时 30s → 强制终止并报告 |
+
+#### E2. Skill 系统（工作流编排层）
+
+**Skill 定义**：一个 Skill = 一段工作流指令 + 可选的 MCP 工具声明 + 触发条件
+
+| 字段 | 说明 |
+|------|------|
+| name | 唯一标识 |
+| description | 给 Agent 的语义描述，用于自动判断是否触发 |
+| trigger | 关键词列表 / 手动命令 / Agent 自动判断 |
+| system_prompt | 该 Skill 专用的系统指令追加 |
+| mcp_tools | 该 Skill 需要的 MCP 工具列表（从 MCP registry 中按名称匹配） |
+| workflow | 步骤定义（Agent 参考而非硬编码执行） |
+
+**V1 内置 Skill**：
+
+| Skill | 核心能力 | 依赖的 MCP 工具 |
+|-------|---------|---------------|
+| **paper-search** | 检索新论文 + 摄入知识库 | 需 MCP server: semantic-scholar |
+| **literature-review** | 生成综述大纲 → 逐节初稿（带引用）→ 自检引用 | 无（纯 LLM + 本地 RAG） |
+| **experiment-runner** | 生成实验方案 → 通过 MCP 连接计算资源执行 → 异常检测 | 需 MCP server: python-executor |
+| **write-report** | 整合项目数据 + 实验结果 → 生成正式报告 | 无（纯 LLM + 本地数据） |
+
+**Skill 执行流程**：
 
 ```
 用户触发 / Agent 判断需要某 Skill
     ↓
-加载 Skill 的 system_prompt + tools
+加载 Skill 的 system_prompt
     ↓
-Agent 按 workflow 步骤执行（允许灵活调整路线）
+从 MCP registry 匹配 Skill 声明的 mcp_tools
+    ↓
+Agent 按 workflow 步骤执行（可灵活调整路线）
+    ├─ 需要工具 → 调用 MCP tool → 结果纳入上下文
+    └─ 纯 LLM 步骤 → 生成
     ↓
 每步结果纳入上下文 + 可选持久化到项目存档
     ↓
 Skill 完成 → 恢复默认 system_prompt
 ```
 
-#### E4. 安全
+#### E3. 工具发现与注册
+
+Agent 启动时从 MCP server 收集的工具列表注册到统一 registry：
+
+```python
+# 工具注册表（Agent 运行时可用）
+tools_registry = {
+    "search_papers": {
+        "mcp_server": "semantic-scholar",
+        "description": "Search for academic papers on Semantic Scholar",
+        "parameters": {"query": "string", "limit": "int"},
+        "require_confirm": False,
+    },
+    "execute_python": {
+        "mcp_server": "python-executor",
+        "description": "Execute Python code and return output",
+        "parameters": {"code": "string"},
+        "require_confirm": True,  # 代码执行需用户确认
+    },
+    "read_file": {
+        "mcp_server": "filesystem",
+        "description": "Read a file from the local filesystem",
+        "parameters": {"path": "string"},
+        "require_confirm": False,
+    },
+    "write_file": {
+        "mcp_server": "filesystem",
+        "description": "Write content to a file",
+        "parameters": {"path": "string", "content": "string"},
+        "require_confirm": True,  # 写文件需用户确认
+    },
+}
+```
+
+**Agent 调用 MCP 工具的方式**（LangGraph 中作为 tool 节点）：
+
+```python
+# Agent 在 router_node 中判断用户意图
+# 如果意图需要工具 → 展示工具选项给用户确认
+# 如果是纯对话 → 走正常 reasoner→retriever→generator 流程
+
+# MCP 工具调用格式（LangGraph tool node）
+def mcp_tool_node(state):
+    tool_name = state.tool_call_name
+    tool_args = state.tool_call_args
+    server = mcp_registry.get_server(tool_name)
+    result = server.call_tool(tool_name, tool_args)
+    state.tool_result = result
+    return state
+```
+
+#### E4. 安全（补充）
 
 - Skill 文件不可含硬编码 API key，key 走凭据模块管理
-- MCP 工具：首次连接需用户授权；涉及计算资源/外发数据需用户确认
-- MCP server 仅允许 localhost 连接
+- MCP server 仅允许本地 stdio 连接（不开放网络端口）
+- 首次连接新 MCP server → 用户授权
+- 涉及文件写入/代码执行/网络请求的工具调用 → 用户预览确认
 - Skill 不可修改其他 Skill 或 Agent 核心代码
+- MCP server 超时 30s → 强制终止
 
 ---
 

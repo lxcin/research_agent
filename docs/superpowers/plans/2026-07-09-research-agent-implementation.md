@@ -94,6 +94,7 @@ research-agent/
 │       ├── agent.py            # LangGraph state graph definition (checkpoint-driven memory)
 │       ├── loop.py             # Agentic Loop: self-check, retry, converge
 │       ├── skill.py            # Skill loader + executor
+│       ├── mcp_client.py        # MCP protocol client (JSON-RPC over stdio) + tool registry
 │       └── skills/
 │           ├── __init__.py
 │           ├── paper_search.py
@@ -118,6 +119,7 @@ research-agent/
 │   ├── test_agent.py
 │   ├── test_loop.py
 │   ├── test_skill.py
+│   ├── test_mcp_client.py
 │   └── test_cli.py
 ```
 
@@ -159,6 +161,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",
     "langchain-core>=0.3",
     "httpx>=0.27",
+    "mcp>=1.0",
     "pydantic>=2.0",
 ]
 
@@ -2991,27 +2994,264 @@ git commit -m "feat: CLI chat interface with interactive mode and status command
 
 ---
 
-### Task 13: Skill System
+### Task 13: Skill + MCP 插件系统
 
 **Files:**
+- Create: `src/research_agent/mcp_client.py`
 - Create: `src/research_agent/skill.py`
 - Create: `src/research_agent/skills/__init__.py`
 - Create: `src/research_agent/skills/paper_search.py`
 - Create: `src/research_agent/skills/literature_review.py`
 - Create: `src/research_agent/skills/write_report.py`
+- Create: `tests/test_mcp_client.py`
 - Create: `tests/test_skill.py`
+- Modify: `src/research_agent/agent.py` (MCP tool discovery in router)
 
 **Interfaces:**
-- Consumes: `search.py` from Task 6, `retrieval.py` from Task 5, `memory.py` from Task 7
-- Produces: `skill.load_skills()→list[Skill]`, `skill.find_skill(user_input, skills)→Skill|None`, `Skill.trigger_phrases`, `Skill.execute(state)→AgentState`
+- Consumes: `search.py` from Task 6, `retrieval.py` from Task 5, `models.py` from Task 1, MCP protocol library
+- Produces: `mcp_client.load_mcp_config()→list[dict]`, `mcp_client.connect_servers(configs)→MCPRegistry`, `mcp_client.MCPRegistry` (call_tool, list_tools, get_server), `skill.load_skills()→list[Skill]`, `skill.find_skill(user_input, skills)→Skill|None`
 
-- [ ] **Step 1: Implement skill.py**
+- [ ] **红阶段：编写 MCP 客户端和 Skill 的失败测试**
 
 ```python
-"""Skill system: load, match, and execute pluggable skills."""
+# tests/test_mcp_client.py
+from unittest.mock import patch, MagicMock
+from research_agent.mcp_client import load_mcp_config, MCPRegistry, connect_servers
+
+
+def test_load_mcp_config_defaults(temp_data_dir):
+    config = load_mcp_config()
+    assert "servers" in config
+    assert isinstance(config["servers"], list)
+
+
+def test_load_mcp_config_with_file(temp_data_dir):
+    import yaml
+    config_path = temp_data_dir / "mcp_servers.yml"
+    config_path.write_text("""
+servers:
+  - name: test-server
+    command: python
+    args: ["-c", "print('hello')"]
+""")
+    config = load_mcp_config()
+    assert len(config["servers"]) >= 1
+
+
+def test_mcp_registry_register_and_list():
+    registry = MCPRegistry()
+    registry.register("test-server", "search", {"description": "Search papers"})
+    tools = registry.list_tools()
+    assert len(tools) >= 1
+    assert any(t["name"] == "search" for t in tools)
+
+
+def test_mcp_registry_call_tool():
+    registry = MCPRegistry()
+    registry.register("test-server", "echo", {"description": "Echo"})
+    with patch.object(registry, "_call_mcp_tool", return_value={"result": "hello"}):
+        result = registry.call_tool("echo", {"message": "hello"})
+        assert result["result"] == "hello"
+
+
+# tests/test_skill.py
+from research_agent.skill import load_skills, find_skill, Skill
+
+
+def test_load_skills():
+    skills = load_skills()
+    assert len(skills) >= 3
+    names = {s.name for s in skills}
+    assert "paper-search" in names
+    assert "literature-review" in names
+    assert "write-report" in names
+
+
+def test_find_skill_match():
+    skills = load_skills()
+    skill = find_skill("帮我搜索论文关于transformer的相关文献", skills)
+    assert skill is not None
+    assert skill.name == "paper-search"
+
+
+def test_find_skill_no_match():
+    skills = load_skills()
+    assert find_skill("今天天气怎么样", skills) is None
+
+
+def test_paper_search_skill_handler(temp_data_dir):
+    from unittest.mock import patch, MagicMock
+    from research_agent.models import AgentState
+    from research_agent.skills.paper_search import _execute_paper_search
+    from research_agent.store import init_db
+
+    init_db()
+    mock_response = [{
+        "paper_id": "abc", "title": "Test Paper", "year": 2024,
+        "citation_count": 10, "authors": ["Author"],
+        "doi": "10.000/test", "abstract": "An abstract."
+    }]
+    with patch("research_agent.skills.paper_search.search_papers", return_value=mock_response):
+        state = AgentState(user_input="搜索论文 transformer attention")
+        result = _execute_paper_search(state)
+        assert "Test Paper" in result.final_response
+```
+
+- [ ] **红验证：运行测试确认失败**
+
+Run: `pytest tests/test_mcp_client.py tests/test_skill.py -v`
+Expected: FAIL with ImportError
+
+- [ ] **绿阶段：实现 mcp_client.py**
+
+```python
+"""MCP protocol client: connect to MCP servers, register tools, call tools."""
+import json
+import subprocess
+import asyncio
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+from research_agent.config import get_data_dir
+
+
+def load_mcp_config() -> dict:
+    config_path = get_data_dir() / "mcp_servers.yml"
+    if not config_path.exists():
+        config_path.write_text("servers: []\n")
+    with open(config_path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {"servers": []}
+
+
+@dataclass
+class MCPTool:
+    server_name: str = ""
+    name: str = ""
+    description: str = ""
+    parameters: dict = field(default_factory=dict)
+    require_confirm: bool = False
+
+
+class MCPRegistry:
+    def __init__(self):
+        self._tools: dict[str, MCPTool] = {}
+        self._server_processes: dict[str, subprocess.Popen] = {}
+
+    def register(self, server_name: str, tool_name: str, metadata: dict):
+        self._tools[tool_name] = MCPTool(
+            server_name=server_name,
+            name=tool_name,
+            description=metadata.get("description", ""),
+            parameters=metadata.get("parameters", {}),
+            require_confirm=metadata.get("require_confirm", False),
+        )
+
+    def list_tools(self) -> list[dict]:
+        return [{
+            "name": t.name,
+            "server": t.server_name,
+            "description": t.description,
+            "require_confirm": t.require_confirm,
+        } for t in self._tools.values()]
+
+    def get_tool(self, name: str) -> MCPTool | None:
+        return self._tools.get(name)
+
+    def call_tool(self, tool_name: str, args: dict) -> dict:
+        tool = self._tools.get(tool_name)
+        if not tool:
+            return {"error": f"Tool '{tool_name}' not found in registry"}
+        return self._call_mcp_tool(tool.server_name, tool_name, args)
+
+    def _call_mcp_tool(self, server_name: str, tool_name: str, args: dict) -> dict:
+        request = json.dumps({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": args},
+            "id": 1,
+        })
+        proc = self._server_processes.get(server_name)
+        if not proc:
+            return {"error": f"Server '{server_name}' not connected"}
+        try:
+            proc.stdin.write(request + "\n")
+            proc.stdin.flush()
+            response_line = proc.stdout.readline()
+            return json.loads(response_line)
+        except Exception as e:
+            return {"error": str(e)}
+
+    def stop_all(self):
+        for name, proc in self._server_processes.items():
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+
+    def start_server(self, name: str, command: str, args: list[str]) -> bool:
+        try:
+            proc = subprocess.Popen(
+                [command] + args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self._server_processes[name] = proc
+            # Send initialize request
+            init_req = json.dumps({
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {}},
+                "id": 0,
+            })
+            proc.stdin.write(init_req + "\n")
+            proc.stdin.flush()
+            response = proc.stdout.readline()
+            resp_data = json.loads(response)
+            if "error" in resp_data:
+                return False
+            # Get tools list
+            tools_req = json.dumps({
+                "jsonrpc": "2.0",
+                "method": "tools/list",
+                "params": {},
+                "id": 2,
+            })
+            proc.stdin.write(tools_req + "\n")
+            proc.stdin.flush()
+            tools_resp = proc.stdout.readline()
+            tools_data = json.loads(tools_resp)
+            for tool in tools_data.get("result", {}).get("tools", []):
+                self.register(name, tool["name"], {
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("inputSchema", {}),
+                })
+            return True
+        except Exception as e:
+            return False
+
+
+def connect_servers(config: dict) -> MCPRegistry:
+    registry = MCPRegistry()
+    for server_cfg in config.get("servers", []):
+        name = server_cfg.get("name", "unknown")
+        command = server_cfg.get("command", "")
+        args = server_cfg.get("args", [])
+        if command:
+            registry.start_server(name, command, args)
+    return registry
+```
+
+- [ ] **绿阶段：实现 skill.py（含 MCP 集成）**
+
+```python
+"""Skill system: load, match, and execute pluggable skills with MCP tool support."""
 from dataclasses import dataclass, field
 from typing import Callable
-from pathlib import Path
 
 from research_agent.models import AgentState
 
@@ -3022,6 +3262,7 @@ class Skill:
     description: str
     trigger_phrases: list[str]
     system_prompt: str = ""
+    mcp_tools: list[str] = field(default_factory=list)
     handler: Callable[[AgentState], AgentState] | None = None
 
 
@@ -3045,253 +3286,54 @@ def find_skill(user_input: str, skills: list[Skill]) -> Skill | None:
     return None
 ```
 
-- [ ] **Step 2: Implement paper_search skill**
+- [ ] **绿阶段：实现内置 skills（略，保持原有实现）**
+
+(paper_search.py, literature_review.py, write_report.py 同原 Task 13 实现)
+
+- [ ] **绿阶段：在 agent.py 的 router_node 中集成 MCP**
 
 ```python
-# src/research_agent/skills/paper_search.py
-"""Skill: search for new papers via Semantic Scholar API."""
-from research_agent.skill import Skill
-from research_agent.search import search_papers
-from research_agent.models import AgentState
-
-
-def _execute_paper_search(state: AgentState) -> AgentState:
-    from research_agent.models import Paper
-    from research_agent.store import insert_paper
-    from research_agent.vector_store import add_chunks
-    from research_agent.ingestion import _chunk_text, _score_source
-
-    query = state.user_input.replace("搜索论文", "").replace("找论文", "").replace("search papers", "").strip()
-    results = search_papers(query, limit=5)
-
-    if not results:
-        state.final_response = f'未找到与 "{query}" 相关的论文。请尝试其他关键词。'
-        return state
-
-    response_lines = [f'搜索 "{query}" 的结果 ({len(results)} 篇):\n']
-    for i, r in enumerate(results):
-        paper = Paper(
-            title=r["title"],
-            doi=r.get("doi", ""),
-            year=r.get("year", 0),
-            citation_count=r.get("citation_count", 0),
-            authors=r.get("authors", []),
-            abstract=r.get("abstract", ""),
-        )
-        _score_source(paper)
-
-        response_lines.append(f"{i+1}. **{r['title']}** ({r.get('year', 'N/A')})")
-        response_lines.append(f"   引用: {r.get('citation_count', 0)} | 质量: {paper.source_score}/10")
-        response_lines.append(f"   作者: {', '.join(r.get('authors', [])[:3])}")
-        if r.get("abstract"):
-            response_lines.append(f"   摘要: {r['abstract'][:200]}...")
-        response_lines.append("")
-
-        pid = insert_paper(paper)
-        chunks = _chunk_text(r.get("abstract", ""))
-        add_chunks(pid, chunks)
-
-    state.final_response = "\n".join(response_lines)
-    state.final_response += f"\n已将 {len(results)} 篇论文摄入知识库。"
-    return state
-
-
-paper_search_skill = Skill(
-    name="paper-search",
-    description="搜索 Semantic Scholar 上的论文并摄入知识库",
-    trigger_phrases=["搜索论文", "找论文", "搜索文献", "search papers", "查找论文"],
-    system_prompt="You are searching for academic papers. Use the Semantic Scholar API.",
-    handler=_execute_paper_search,
-)
-```
-
-- [ ] **Step 3: Implement literature_review skill**
-
-```python
-# src/research_agent/skills/literature_review.py
-"""Skill: generate literature review outline and draft sections."""
-from research_agent.skill import Skill
-from research_agent.models import AgentState
-from research_agent.retrieval import hybrid_search, build_bm25_index
-
-
-def _execute_literature_review(state: AgentState) -> AgentState:
-    topic = state.active_project.topic if state.active_project else "the research topic"
-
-    build_bm25_index()
-    results = hybrid_search(topic, n_results=15)
-
-    if not results:
-        state.final_response = f'知识库中暂无与 "{topic}" 相关的论文。请先用 /paper-search 检索并摄入论文。'
-        return state
-
-    papers = {}
-    for r in results:
-        pid = r.get("paper_id", "unknown")
-        if pid not in papers:
-            papers[pid] = {"chunks": [], "title": r.get("title", pid)}
-        papers[pid]["chunks"].append(r)
-
-    outline = f"# 文献综述：{topic}\n\n## 大纲\n\n"
-    sections = ["引言与背景", "核心方法与技术", "主要发现与对比", "开放问题与未来方向"]
-    for i, sec in enumerate(sections):
-        outline += f"{i+1}. {sec}\n"
-
-    outline += "\n---\n\n## 初稿\n\n"
-    outline += "### 1. 引言与背景\n\n"
-    for pid, data in list(papers.items())[:3]:
-        first_chunk = data["chunks"][0]["text"] if data["chunks"] else "无摘要"
-        outline += f"根据文献 {pid[:8]}...，{first_chunk[:200]}...\n\n"
-
-    state.final_response = outline
-    state.final_response += "\n---\n引用来源: " + ", ".join(f"paper:{pid[:8]}" for pid in papers)
-    state.final_response += "\n自信度: 推测 - 初稿待用户审阅补充"
-    return state
-
-
-literature_review_skill = Skill(
-    name="literature-review",
-    description="根据知识库生成文献综述大纲和初稿",
-    trigger_phrases=["写综述", "文献综述", "literature review", "写review", "帮我写综述"],
-    system_prompt="You are writing a literature review. Generate outline first, then draft sections with citations.",
-    handler=_execute_literature_review,
-)
-```
-
-- [ ] **Step 4: Implement write_report skill**
-
-```python
-# src/research_agent/skills/write_report.py
-"""Skill: write research report from project data."""
-from research_agent.skill import Skill
-from research_agent.models import AgentState
-from research_agent.retrieval import hybrid_search, build_bm25_index
-
-
-def _execute_write_report(state: AgentState) -> AgentState:
-    topic = state.active_project.topic if state.active_project else "research project"
-
-    build_bm25_index()
-    results = hybrid_search(topic, n_results=10)
-
-    report = f"# 研究报告：{topic}\n\n"
-    report += f"## 项目进度\n\n"
-    if state.active_project:
-        report += f"- 状态: {state.active_project.status.value}\n"
-        report += f"- 历史摘要: {state.active_project.history_summary[:500]}\n"
-
-    report += "\n## 文献基础\n\n"
-    seen = set()
-    for r in results:
-        pid = r.get("paper_id", "unknown")
-        if pid not in seen:
-            seen.add(pid)
-            report += f"- [{pid[:8]}] {r['text'][:150]}...\n"
-
-    report += "\n## 结论与下一步\n\n"
-    if state.active_project and state.active_project.plan:
-        for step in state.active_project.plan:
-            report += f"- [{step.status}] {step.step} ({step.owner})\n"
-    else:
-        report += "待补充研究计划和实验数据。\n"
-
-    state.final_response = report
-    state.final_response += "\n---\n自信度: 推测 - 报告需要你补充实验数据和审阅"
-    return state
-
-
-write_report_skill = Skill(
-    name="write-report",
-    description="整合项目数据生成正式研究报告",
-    trigger_phrases=["写报告", "生成报告", "写report", "write report", "出报告"],
-    system_prompt="You are writing a comprehensive research report. Integrate all project data.",
-    handler=_execute_write_report,
-)
-```
-
-- [ ] **Step 5: Integrate skills into agent.py**
-
-```python
-# Modify agent.py - add to router_node, after setting active_project:
-
+# 在 agent.py 的 router_node 末尾添加：
+from research_agent.mcp_client import load_mcp_config, connect_servers
 from research_agent.skill import load_skills, find_skill
-from research_agent.loop import boundary_check
 
-# In router_node, add at the end:
-def router_node(state: AgentState) -> AgentState:
-    # ... existing code ...
+# 在 router_node 中，检查 skill 之前先检查 MCP 工具
+mcp = connect_servers(load_mcp_config())
+tools = mcp.list_tools()
 
-    # Check for skill triggers
-    skills = load_skills()
-    skill = find_skill(state.user_input, skills)
-    if skill and skill.handler:
-        state = skill.handler(state)
+# 如果用户输入匹配某个 MCP 工具 → 提示用户确认
+for tool in tools:
+    if tool["name"] in state.user_input.lower() or any(
+        kw in state.user_input.lower() for kw in ["用工具", "调用", "mcp", "执行代码"]
+    ):
+        state.final_response = f"可用 MCP 工具: {json.dumps(tools, ensure_ascii=False, indent=2)}"
         return state
 
+# 然后检查 Skill
+skills = load_skills()
+skill = find_skill(state.user_input, skills)
+if skill and skill.handler:
+    state = skill.handler(state)
     return state
 ```
 
-- [ ] **Step 6: Write tests**
+- [ ] **绿验证：运行测试**
 
-```python
-# tests/test_skill.py
-from research_agent.skill import load_skills, find_skill, Skill
+Run: `pytest tests/test_mcp_client.py tests/test_skill.py -v`
+Expected: 8 PASS
 
+- [ ] **重构验证：安全审计**
 
-def test_load_skills():
-    skills = load_skills()
-    assert len(skills) >= 3
-    names = {s.name for s in skills}
-    assert "paper-search" in names
-    assert "literature-review" in names
-    assert "write-report" in names
+Run: `grep -r "api_key\|password\|secret" src/research_agent/mcp_client.py src/research_agent/skill.py src/research_agent/skills/ --include="*.py"`
+Expected: 无匹配（确保无硬编码凭据）
 
-
-def test_find_skill_match():
-    skills = load_skills()
-    skill = find_skill("帮我搜索论文关于transformer的相关文献", skills)
-    assert skill is not None
-    assert skill.name == "paper-search"
-
-
-def test_find_skill_no_match():
-    skills = load_skills()
-    skill = find_skill("今天天气怎么样", skills)
-    assert skill is None
-
-
-def test_paper_search_skill_handler(temp_data_dir):
-    from unittest.mock import patch, MagicMock
-    from research_agent.models import AgentState
-    from research_agent.skills.paper_search import _execute_paper_search
-    from research_agent.store import init_db
-
-    init_db()
-
-    mock_response = {"data": [{
-        "paperId": "abc", "title": "Test Paper", "year": 2024,
-        "citationCount": 10, "authors": [{"name": "Author"}],
-        "externalIds": {"DOI": "10.000/test"}, "abstract": "An abstract."
-    }]}
-
-    with patch("research_agent.skills.paper_search.search_papers", return_value=mock_response["data"]):
-        state = AgentState(user_input="搜索论文 transformer attention")
-        result = _execute_paper_search(state)
-        assert len(result.final_response) > 0
-        assert "Test Paper" in result.final_response
-```
-
-- [ ] **Step 7: Run tests**
-
-Run: `pytest tests/test_skill.py -v`
-Expected: 4 PASS
-
-- [ ] **Step 8: Commit**
+- [ ] **提交**
 
 ```bash
-git add src/research_agent/skill.py src/research_agent/skills/ tests/test_skill.py
-git add src/research_agent/agent.py  # (skill integration in router_node)
-git commit -m "feat: skill system with paper-search, literature-review, and write-report"
+git add src/research_agent/mcp_client.py src/research_agent/skill.py src/research_agent/skills/
+git add tests/test_mcp_client.py tests/test_skill.py
+git add src/research_agent/agent.py
+git commit -m "feat: skill system with MCP client integration, tool registry, and 3 built-in skills"
 ```
 
 ---
@@ -3477,7 +3519,7 @@ Expected: Shows available commands (chat, status)
 | wt-foundation | `pip install -e .` 成功; `pytest tests/test_models.py tests/test_store.py tests/test_compressor.py tests/test_router.py -v` 全 PASS |
 | wt-rag | `pytest tests/test_vector_store.py tests/test_ingestion.py tests/test_retrieval.py tests/test_search.py tests/test_eval.py -v` 全 PASS; `research-agent eval --domain attention_mechanism` 输出 Recall@5/10/Precision/MRR |
 | wt-agent | `pytest tests/test_agent.py tests/test_loop.py tests/test_cli.py -v` 全 PASS; `research-agent --help` 显示命令; `research-agent chat "test"` 输出回答 |
-| wt-skills | `pytest tests/test_skill.py -v` 全 PASS; 输入"搜索论文"触发 paper-search |
+| wt-skills | `pytest tests/test_skill.py tests/test_mcp_client.py -v` 全 PASS; 输入"搜索论文"触发 paper-search; `research-agent` 启动时连接 MCP server 不报错 |
 | wt-integration | `pytest tests/ -v` 全部 PASS; `research-agent status` 显示项目状态; 无硬编码凭据 |
 
 ### 最终交付前验证
