@@ -8,16 +8,70 @@
 
 **Tech Stack:** Python 3.11+, LangGraph, LiteLLM, Chroma, rank-bm25, pymupdf, SQLite, Click (CLI)
 
+## Worktree Map
+
+5 个隔离 worktree，每个对应一个 PR：
+
+| Worktree | 分支 | 包含 Task | 模块 | 依赖 |
+|----------|------|----------|------|------|
+| `wt-foundation` | `feat/foundation` | 1, 2, 8, 9 | 脚手架+存储+压缩+路由 | 无 |
+| `wt-rag` | `feat/rag` | 3, 4, 5, 6, 7 | 向量库+摄入+检索+搜索+评估 | 依赖 wt-foundation |
+| `wt-agent` | `feat/agent` | 10, 11, 12 | LangGraph Agent+Loop+CLI | 依赖 wt-rag |
+| `wt-skills` | `feat/skills` | 13 | Skill 系统 | 依赖 wt-agent |
+| `wt-integration` | `feat/integration` | 14, 15 | 集成测试+文档 | 依赖 wt-skills |
+
 ## Global Constraints
 
 - Python 3.11+
+- 每个 worktree 创建前从 `master` 分支 checkout 最新代码
+- 前一个 worktree 的 PR 合并到 master 后，下一个 worktree 从 master 拉取最新再创建
 - All dependencies declared in `pyproject.toml` with exact lower bounds
 - Data stored under `~/research-agent-data/` (configurable via `RESEARCH_AGENT_DATA_DIR`)
 - LLM API key from env var `RESEARCH_AGENT_LLM_KEY` or config file
 - No hardcoded API keys anywhere
-- TDD: every module has a corresponding test file under `tests/`
 - CLI via Click library
 - Commit after each task with `feat:` / `test:` prefixed messages
+
+## TDD 强制流程（每个 Task 必须遵守）
+
+每个 task 内的步骤必须按以下顺序执行：
+
+```
+[ ] 红阶段：编写失败测试（预期 FAIL）
+[ ] 红验证：运行测试 → 确认 FAIL（ImportError / AssertionError）
+[ ] 绿阶段：编写最小实现代码使测试通过
+[ ] 绿验证：运行测试 → 确认 PASS
+[ ] 重构阶段：优化代码（去重、提取常量、改善命名），保持测试绿
+[ ] 重构验证：运行测试 → 确认 PASS
+[ ] 提交：git add + git commit
+```
+
+**反例**：禁止任何步骤在测试通过前就写实现代码。
+
+## 两阶段评审 Gate（每个 Task 完成后必须执行）
+
+每个 task 最后一个 commit 后，必须通过两道评审才能进入下一 task：
+
+```
+[ ] Gate 1: SPEC 合规检查
+    - 逐条对照 SPEC 的功能规约，确认本 task 实现的功能在 spec 中有对应
+    - 确认没有超出 spec 范围的功能（scope creep）
+    - 确认所有边界条件和错误处理已覆盖
+    → 通过条件：0 个 critical issue
+
+[ ] Gate 2: 代码质量检查
+    - 所有测试绿色（pytest 全 PASS）
+    - 无硬编码凭据（grep -r "api_key\|password\|secret" src/ --include="*.py"）
+    - 无 TODO / FIXME / 注释掉的代码
+    - 类型注解完整（函数签名和返回值）
+    → 通过条件：0 个 critical issue
+```
+
+**Critical issue 定义**：测试失败、安全漏洞、导致后续 task 无法进行的接口错误。Critical issue 必须修复才能进入下一 task。
+
+## 完成分支
+
+所有 5 个 worktree 的 PR 合并到 master 后，由 `finishing-a-development-branch` 技能决定最终处理方式（merge / PR / 保留 / 丢弃）。
 
 ## File Structure
 
@@ -3416,13 +3470,26 @@ Expected: Shows available commands (chat, status)
 
 ## Verification Checklist
 
-After all tasks complete, manually verify:
+### 每个 Worktree 完成后的验证
+
+| Worktree | 验证项 |
+|----------|--------|
+| wt-foundation | `pip install -e .` 成功; `pytest tests/test_models.py tests/test_store.py tests/test_compressor.py tests/test_router.py -v` 全 PASS |
+| wt-rag | `pytest tests/test_vector_store.py tests/test_ingestion.py tests/test_retrieval.py tests/test_search.py tests/test_eval.py -v` 全 PASS; `research-agent eval --domain attention_mechanism` 输出 Recall@5/10/Precision/MRR |
+| wt-agent | `pytest tests/test_agent.py tests/test_loop.py tests/test_cli.py -v` 全 PASS; `research-agent --help` 显示命令; `research-agent chat "test"` 输出回答 |
+| wt-skills | `pytest tests/test_skill.py -v` 全 PASS; 输入"搜索论文"触发 paper-search |
+| wt-integration | `pytest tests/ -v` 全部 PASS; `research-agent status` 显示项目状态; 无硬编码凭据 |
+
+### 最终交付前验证
 
 1. `pip install -e .` succeeds with all dependencies
-2. `research-agent --help` shows commands
+2. `research-agent --help` shows commands (chat, status, eval)
 3. `research-agent status` shows initial state
 4. `research-agent chat "test query"` produces a response (with LLM key set)
-5. `~/research-agent-data/` contains expected files
-6. `pytest tests/ -v` all pass
-7. No hardcoded API keys in any source file
-8. `git log --oneline` shows one commit per task
+5. `research-agent eval --domain attention_mechanism` outputs recall metrics
+6. `~/research-agent-data/` contains expected files (chroma_db/, research_agent.db, eval/)
+7. `pytest tests/ -v` all pass
+8. No hardcoded API keys in any source file
+9. `git log --oneline` shows one commit per task across 5 branches
+10. All 5 worktree PRs merged to master
+11. `finishing-a-development-branch` 技能执行完成
