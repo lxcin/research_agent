@@ -48,7 +48,7 @@ def boundary_check(task_description: str) -> dict:
                 "suggestion": "",
             }
 
-    uncertain_keywords = ["精确值", "具体数值", "多少度", "多少克", "多少mol"]
+    uncertain_keywords = ["精确值", "具体数值", "多少度", "多少克", "多少mol", "多少k", "自由能", "键能", "活化能", "晶格能"]
     for kw in uncertain_keywords:
         if kw in task_lower:
             return {
