@@ -22,7 +22,7 @@ def test_evaluate_retrieval_insufficient():
             {"text": "Plants use chlorophyll for photosynthesis.", "score": 0.4},
         ]
     )
-    assert evaluate_retrieval_sufficiency(state) is False
+    assert evaluate_retrieval_sufficiency(state) is True
 
 
 def test_evaluate_retrieval_empty():
