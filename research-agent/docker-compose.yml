@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  agent:
+    build: .
+    image: research-agent:dev
+    container_name: research-agent
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./src:/app/src:ro
+      - research_data:/data
+    environment:
+      - RESEARCH_AGENT_LLM_KEY=${RESEARCH_AGENT_LLM_KEY:-}
+    command: chat
+
+  test:
+    build: .
+    image: research-agent:dev
+    container_name: research-agent-test
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+    environment:
+      - RESEARCH_AGENT_DATA_DIR=/tmp/test_data
+    command: pytest tests/ -v --tb=short
+
+volumes:
+  research_data:
