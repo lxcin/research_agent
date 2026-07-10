@@ -45,6 +45,10 @@ research-agent/
 │           ├── paper_search.py
 │           ├── literature_review.py
 │           └── write_report.py
+│       └── eval/
+│           ├── __init__.py
+│           ├── benchmark.py
+│           └── runner.py
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py             # Pytest fixtures: tmp data dir, in-memory DB, etc.
@@ -56,6 +60,7 @@ research-agent/
 │   ├── test_search.py
 │   ├── test_router.py
 │   ├── test_compressor.py
+│   ├── test_eval.py
 │   ├── test_agent.py
 │   ├── test_loop.py
 │   ├── test_skill.py
@@ -83,7 +88,7 @@ research-agent/
 ```toml
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "research-agent"
@@ -120,7 +125,7 @@ where = ["src"]
 - [ ] **Step 2: Verify pyproject.toml can be installed**
 
 Run: `pip install -e .` from `research-agent/`
-Expected: Installs successfully with no errors. `research-agent --help` works.
+Expected: Installs successfully with no errors.
 
 - [ ] **Step 3: Create config.py**
 
@@ -386,7 +391,7 @@ import sqlite3
 from pathlib import Path
 
 from research_agent.config import get_data_dir
-from research_agent.models import Paper, Project, PendingTask, PlanStep
+from research_agent.models import Paper, Project, PendingTask, PlanStep, AccumulatedWisdom, ProjectStatus
 
 _DB = None
 
@@ -485,14 +490,14 @@ def delete_paper(paper_id: str):
 
 def _project_from_row(row) -> Project:
     plan_raw = json.loads(row["plan"])
-    wisdom_data = json.loads(row["accumulated_wisdom"]) if row.get("accumulated_wisdom") else {}
+    wisdom_data = json.loads(row["accumulated_wisdom"]) if row["accumulated_wisdom"] else {}
     return Project(
         id=row["id"],
         topic=row["topic"],
-        status=row["status"],
+        status=ProjectStatus(row["status"]) if row["status"] else ProjectStatus.ACTIVE,
         pending_task=PendingTask(**json.loads(row["pending_task"])) if row["pending_task"] else None,
         history_summary=row["history_summary"],
-        intro_summary=row.get("intro_summary", ""),
+        intro_summary=row["intro_summary"] if "intro_summary" in row.keys() else "",
         accumulated_wisdom=AccumulatedWisdom(**wisdom_data) if wisdom_data else AccumulatedWisdom(),
         plan=[PlanStep(**s) for s in plan_raw],
         created_at=row["created_at"],
@@ -509,7 +514,7 @@ def insert_project(project: Project) -> str:
     db.execute(
         "INSERT OR REPLACE INTO projects (id, topic, status, pending_task, history_summary, intro_summary, accumulated_wisdom, plan, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (project_id, project.topic, project.status.value,
+        (project_id, project.topic, project.status.value if hasattr(project.status, 'value') else project.status,
          json.dumps(project.pending_task.__dict__) if project.pending_task else None,
          project.history_summary,
          project.intro_summary,
@@ -540,6 +545,18 @@ def update_project(project: Project):
 def delete_project(project_id: str):
     db = _get_db()
     db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    db.commit()
+
+
+def init_conflict_table():
+    db = _get_db()
+    db.execute("""CREATE TABLE IF NOT EXISTS chunk_conflicts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        paper_id_a TEXT NOT NULL,
+        chunk_index_a INTEGER NOT NULL,
+        paper_id_b TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT ''
+    )""")
     db.commit()
 ```
 
@@ -1491,7 +1508,386 @@ git commit -m "feat: Semantic Scholar API client for paper search and metadata"
 
 ---
 
-### Task 7: Project Checkpoint & Knowledge Compression
+### Task 7: RAG 消融实验与召回率基线评估
+
+**Files:**
+- Create: `src/research_agent/eval/__init__.py`
+- Create: `src/research_agent/eval/benchmark.py`
+- Create: `src/research_agent/eval/runner.py`
+- Create: `tests/test_eval.py`
+
+**Interfaces:**
+- Consumes: `ingestion.py` from Task 4, `retrieval.py` from Task 5, `search.py` from Task 6, `vector_store.py` from Task 3, `models.py` from Task 1
+- Produces: `eval.run_ablation(domain)→dict`, `eval.run_plain_rag(queries, ground_truth)→dict`, `eval.run_section_chunked_rag(queries, ground_truth)→dict`, `eval.run_hybrid_rag(queries, ground_truth)→dict`, `eval.run_agentic_rag(queries, ground_truth)→dict`, `eval.compute_metrics(results, ground_truth)→dict`, `eval.save_results(results, label)→Path`
+
+**信息记录**：每次评估输出保存到 `~/research-agent-data/eval/`，记录 embedding 模型、分块参数、RRF k 值、论文来源、LLM 版本，确保 V2 可复现对比。
+
+**消融实验矩阵**（每一步都要对比）：
+
+| 实验编号 | 配置 | 对比什么 |
+|---------|------|---------|
+| E1 | 固定大小分块 + 纯向量检索 | 基线：最简单的 RAG |
+| E2 | 章节感知分块 + 纯向量检索 | 分块策略消融 |
+| E3 | 章节感知分块 + 混合检索（向量+BM25+RRF） | 检索策略消融 |
+| E4 | E3 + Agentic Loop（自纠正+反思重试） | Agentic 消融 |
+| E5（V2） | E3 + 知识图谱 | 图检索消融 |
+| E6（V2） | E5 + Agentic Loop | 图+Agentic 组合 |
+
+**每次实验记录**：Recall@5/10、Precision@5、MRR、Token 消耗（LLM 调用次数 × 平均 Token）、检索耗时。
+
+- [ ] **Step 1: 创建 benchmark 数据集**
+
+```python
+# src/research_agent/eval/benchmark.py
+"""Benchmark datasets for RAG evaluation."""
+
+# 3 domains, 3 papers each, 3 ground-truth facts per paper
+BENCHMARK_DOMAINS = {
+    "attention_mechanism": {
+        "query": "attention mechanism in transformers",
+        "seed_papers": [
+            "Attention Is All You Need",
+            "BERT: Pre-training of Deep Bidirectional Transformers",
+            "An Image is Worth 16x16 Words: Transformers for Image Recognition",
+        ],
+        "ground_truth": [
+            # Paper 1: Attention Is All You Need
+            {"fact": "The Transformer uses scaled dot-product attention", "paper_idx": 0,
+             "queries": ["What attention mechanism does the Transformer use?",
+                         "How does Transformer compute attention?",
+                         "What is scaled dot-product attention?"]},
+            {"fact": "Multi-head attention allows the model to jointly attend to information from different representation subspaces", "paper_idx": 0,
+             "queries": ["Why use multi-head attention?", "What is the benefit of multi-head attention?",
+                         "How does multi-head attention work?"]},
+            {"fact": "The Transformer achieves 28.4 BLEU on WMT 2014 English-to-German translation", "paper_idx": 0,
+             "queries": ["What BLEU score did Transformer achieve?", "Transformer WMT 2014 performance",
+                         "Translation benchmark results for Transformer"]},
+            # Paper 2: BERT
+            {"fact": "BERT is designed to pre-train deep bidirectional representations by jointly conditioning on both left and right context", "paper_idx": 1,
+             "queries": ["How does BERT pre-training work?", "What makes BERT bidirectional?",
+                         "BERT's key innovation in pre-training"]},
+            {"fact": "BERT uses masked language modeling and next sentence prediction as pre-training objectives", "paper_idx": 1,
+             "queries": ["What are BERT's pre-training tasks?", "BERT training objectives",
+                         "MLM and NSP in BERT"]},
+            {"fact": "BERT achieved state-of-the-art results on 11 NLP tasks including GLUE, SQuAD, and SWAG", "paper_idx": 1,
+             "queries": ["What benchmarks did BERT improve?", "BERT performance on NLP tasks",
+                         "Which tasks did BERT set new records on?"]},
+            # Paper 3: ViT
+            {"fact": "Vision Transformer applies a pure Transformer directly to sequences of image patches", "paper_idx": 2,
+             "queries": ["How does ViT process images?", "Vision Transformer image patches",
+                         "How does ViT convert images to tokens?"]},
+            {"fact": "ViT attains excellent results when pre-trained on large datasets and transferred to mid-sized or small image recognition benchmarks", "paper_idx": 2,
+             "queries": ["How well does ViT perform?", "ViT transfer learning results",
+                         "Does ViT need large datasets?"]},
+            {"fact": "The standard Transformer receives as input a 1D sequence of token embeddings, while ViT handles 2D images", "paper_idx": 2,
+             "queries": ["How does ViT differ from standard Transformer?", "ViT input format",
+                         "Difference between text Transformer and image Transformer"]},
+        ],
+    },
+}
+```
+
+- [ ] **Step 2: 创建评估 runner**
+
+```python
+# src/research_agent/eval/runner.py
+"""RAG ablation study runner."""
+import json
+import time
+from pathlib import Path
+from dataclasses import dataclass, field
+
+from research_agent.config import get_data_dir
+from research_agent.retrieval import hybrid_search, build_bm25_index
+from research_agent.vector_store import search as vector_search
+
+
+@dataclass
+class EvalResult:
+    experiment: str = ""
+    recall_at_5: float = 0.0
+    recall_at_10: float = 0.0
+    precision_at_5: float = 0.0
+    mrr: float = 0.0
+    avg_retrieval_time_ms: float = 0.0
+    total_llm_calls: int = 0
+    total_tokens: int = 0
+    per_query: list[dict] = field(default_factory=list)
+
+
+def compute_metrics(results: list[dict], ground_truths: list[str]) -> EvalResult:
+    recalls_5 = []
+    recalls_10 = []
+    precisions_5 = []
+    mrrs = []
+    times = []
+
+    for r in results:
+        gt = set(r["ground_truth"].lower().split())
+        retrieved_5 = r.get("retrieved_5", [])
+        retrieved_10 = r.get("retrieved_10", [])
+        times.append(r.get("time_ms", 0))
+
+        # Recall@5: does any top-5 chunk contain the ground truth?
+        hits_5 = any(_overlap_ratio(gt, c["text"].lower().split()) > 0.3 for c in retrieved_5)
+        recalls_5.append(1.0 if hits_5 else 0.0)
+
+        # Recall@10
+        hits_10 = any(_overlap_ratio(gt, c["text"].lower().split()) > 0.3 for c in retrieved_10)
+        recalls_10.append(1.0 if hits_10 else 0.0)
+
+        # Precision@5: how many top-5 are relevant?
+        relevant_5 = sum(1 for c in retrieved_5 if _overlap_ratio(gt, c["text"].lower().split()) > 0.3)
+        precisions_5.append(relevant_5 / max(len(retrieved_5), 1))
+
+        # MRR: rank of first relevant result
+        mrr = 0.0
+        for rank, c in enumerate(retrieved_10):
+            if _overlap_ratio(gt, c["text"].lower().split()) > 0.3:
+                mrr = 1.0 / (rank + 1)
+                break
+        mrrs.append(mrr)
+
+    return EvalResult(
+        recall_at_5=sum(recalls_5) / max(len(recalls_5), 1),
+        recall_at_10=sum(recalls_10) / max(len(recalls_10), 1),
+        precision_at_5=sum(precisions_5) / max(len(precisions_5), 1),
+        mrr=sum(mrrs) / max(len(mrrs), 1),
+        avg_retrieval_time_ms=sum(times) / max(len(times), 1),
+    )
+
+
+def _overlap_ratio(set_a: set, set_b: set) -> float:
+    if not set_a:
+        return 0.0
+    return len(set_a & set_b) / len(set_a)
+
+
+def run_plain_rag(queries: list[str], ground_truth: str, chunk_size: int = 512) -> dict:
+    """E1: Fixed-size chunking + pure vector search."""
+    t0 = time.time()
+    retrieved_5 = vector_search(queries, n_results=5)
+    retrieved_10 = vector_search(queries, n_results=10)
+    return {
+        "ground_truth": ground_truth,
+        "retrieved_5": _format_results(retrieved_5),
+        "retrieved_10": _format_results(retrieved_10),
+        "time_ms": (time.time() - t0) * 1000,
+        "llm_calls": 0, "tokens": 0,
+    }
+
+
+def run_hybrid_rag(queries: str, ground_truth: str) -> dict:
+    """E3: Section-aware chunking + hybrid search (vector+BM25+RRF)."""
+    t0 = time.time()
+    build_bm25_index()
+    retrieved_5 = hybrid_search(queries, n_results=5)
+    retrieved_10 = hybrid_search(queries, n_results=10)
+    return {
+        "ground_truth": ground_truth,
+        "retrieved_5": retrieved_5,
+        "retrieved_10": retrieved_10,
+        "time_ms": (time.time() - t0) * 1000,
+        "llm_calls": 0, "tokens": 0,
+    }
+
+
+def run_agentic_rag(queries: str, ground_truth: str) -> dict:
+    """E4: Hybrid search + Agentic Loop (self-correction, max 3 retries)."""
+    import litellm
+    t0 = time.time()
+    llm_calls = 0
+    total_tokens = 0
+
+    # First attempt: hybrid search
+    build_bm25_index()
+    results = hybrid_search(queries, n_results=10)
+
+    # Agentic loop: check if results are sufficient, if not, re-query
+    for attempt in range(3):
+        if len(results) >= 3:
+            break
+        # Refine query using LLM
+        try:
+            resp = litellm.completion(
+                model="claude-3-haiku-20240307",
+                messages=[{"role": "user", "content": f"Rewrite this search query to be more precise for academic paper retrieval: '{queries}'. Output ONLY the revised query."}],
+                max_tokens=50, temperature=0.1,
+            )
+            llm_calls += 1
+            total_tokens += resp.usage.total_tokens if hasattr(resp, 'usage') else 50
+            refined = resp.choices[0].message.content.strip()
+            results = hybrid_search(refined, n_results=10)
+        except Exception:
+            break
+
+    return {
+        "ground_truth": ground_truth,
+        "retrieved_5": results[:5],
+        "retrieved_10": results[:10],
+        "time_ms": (time.time() - t0) * 1000,
+        "llm_calls": llm_calls,
+        "tokens": total_tokens,
+    }
+
+
+def _format_results(results: dict | list) -> list[dict]:
+    if isinstance(results, list):
+        return results
+    docs = results.get("documents", [[]])[0]
+    metas = results.get("metadatas", [[]])[0]
+    return [{"text": docs[i], "paper_id": metas[i].get("paper_id", "")}
+            for i in range(len(docs))]
+
+
+def save_results(result: EvalResult, label: str) -> Path:
+    """Save evaluation results to disk for future comparison."""
+    eval_dir = get_data_dir() / "eval"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    path = eval_dir / f"{label}.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(result.__dict__, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def run_ablation(domain_data: dict, domain_name: str) -> dict[str, EvalResult]:
+    """Run full ablation study for one domain."""
+    results = {}
+    ground_truths = domain_data["ground_truth"]
+
+    # E1: Plain RAG (fixed chunking + vector only)
+    e1 = []
+    for gt in ground_truths:
+        for q in gt["queries"]:
+            e1.append(run_plain_rag(q, gt["fact"]))
+    results["E1_plain_rag"] = compute_metrics(e1, [g["fact"] for g in ground_truths])
+    results["E1_plain_rag"].experiment = "E1_plain_rag"
+
+    # E3: Hybrid RAG
+    e3 = []
+    for gt in ground_truths:
+        for q in gt["queries"]:
+            e3.append(run_hybrid_rag(q, gt["fact"]))
+    results["E3_hybrid_rag"] = compute_metrics(e3, [g["fact"] for g in ground_truths])
+    results["E3_hybrid_rag"].experiment = "E3_hybrid_rag"
+
+    # E4: Agentic RAG
+    e4 = []
+    for gt in ground_truths:
+        for q in gt["queries"]:
+            e4.append(run_agentic_rag(q, gt["fact"]))
+    results["E4_agentic_rag"] = compute_metrics(e4, [g["fact"] for g in ground_truths])
+    results["E4_agentic_rag"].experiment = "E4_agentic_rag"
+
+    return results
+```
+
+- [ ] **Step 3: 创建 eval 入口和测试**
+
+```python
+# src/research_agent/eval/__init__.py
+from research_agent.eval.runner import (
+    run_ablation, run_plain_rag, run_hybrid_rag, run_agentic_rag,
+    compute_metrics, save_results, EvalResult,
+)
+from research_agent.eval.benchmark import BENCHMARK_DOMAINS
+```
+
+```python
+# tests/test_eval.py
+from research_agent.eval.runner import compute_metrics, EvalResult, _overlap_ratio
+
+
+def test_overlap_ratio():
+    assert _overlap_ratio({"a", "b", "c"}, {"a", "b"}) == 2/3
+    assert _overlap_ratio({"a"}, {"x", "y"}) == 0.0
+    assert _overlap_ratio(set(), {"a"}) == 0.0
+
+
+def test_compute_metrics_perfect():
+    results = [
+        {"ground_truth": "The Transformer uses scaled dot-product attention",
+         "retrieved_5": [{"text": "The Transformer uses scaled dot-product attention"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}],
+         "retrieved_10": [{"text": "The Transformer uses scaled dot-product attention"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}],
+         "time_ms": 10},
+    ]
+    result = compute_metrics(results, ["The Transformer uses scaled dot-product attention"])
+    assert result.recall_at_5 == 1.0
+    assert result.mrr == 1.0
+
+
+def test_compute_metrics_miss():
+    results = [
+        {"ground_truth": "specific fact about transformers",
+         "retrieved_5": [{"text": "unrelated content"}, {"text": "more unrelated"}, {"text": "other"}, {"text": "other"}, {"text": "other"}],
+         "retrieved_10": [{"text": "unrelated"}, {"text": "more"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}, {"text": "other"}],
+         "time_ms": 5},
+    ]
+    result = compute_metrics(results, ["specific fact about transformers"])
+    assert result.recall_at_5 == 0.0
+    assert result.mrr == 0.0
+
+
+def test_benchmark_structure():
+    from research_agent.eval.benchmark import BENCHMARK_DOMAINS
+    for domain, data in BENCHMARK_DOMAINS.items():
+        assert "seed_papers" in data
+        assert "ground_truth" in data
+        for gt in data["ground_truth"]:
+            assert "fact" in gt
+            assert "queries" in gt
+            assert len(gt["queries"]) >= 2
+```
+
+- [ ] **Step 4: 运行测试验证**
+
+Run: `pytest tests/test_eval.py -v`
+Expected: 4 PASS
+
+- [ ] **Step 5: 在 CLI 中添加 eval 命令**
+
+在 `cli.py` 中添加：
+
+```python
+@main.command()
+@click.option("--domain", default="attention_mechanism", help="Domain to evaluate")
+def eval(domain):
+    """Run RAG ablation study and save results."""
+    from research_agent.eval import run_ablation, save_results, BENCHMARK_DOMAINS
+    click.echo(f"Running ablation for domain: {domain}")
+    data = BENCHMARK_DOMAINS.get(domain)
+    if not data:
+        click.echo(f"Unknown domain: {domain}. Available: {list(BENCHMARK_DOMAINS.keys())}")
+        return
+    results = run_ablation(data, domain)
+    for name, r in results.items():
+        path = save_results(r, name)
+        click.echo(f"  {name}: Recall@5={r.recall_at_5:.2f} Recall@10={r.recall_at_10:.2f} "
+                   f"Precision@5={r.precision_at_5:.2f} MRR={r.mrr:.2f} → {path}")
+```
+
+- [ ] **Step 6: 运行完整消融实验**
+
+```bash
+research-agent eval --domain attention_mechanism
+```
+
+检查输出：
+- E1_plain_rag 结果
+- E3_hybrid_rag 结果（应优于 E1）
+- E4_agentic_rag 结果（应优于 E3，但 Token 消耗更高）
+- 所有结果保存到 `~/research-agent-data/eval/`
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/research_agent/eval/ tests/test_eval.py src/research_agent/cli.py
+git commit -m "feat: RAG ablation evaluation with recall/precision/MRR baseline and token tracking"
+```
+
+---
+
+### Task 8: Project Checkpoint & Knowledge Compression
 
 **Files:**
 - Create: `src/research_agent/compressor.py`
@@ -1688,7 +2084,7 @@ git commit -m "feat: periodic compression with accumulated wisdom extraction (SO
 
 ---
 
-### Task 8: Project Routing Logic
+### Task 9: Project Routing Logic
 
 **Files:**
 - Create: `src/research_agent/router.py`
@@ -1837,7 +2233,7 @@ git commit -m "feat: project auto-routing with keyword overlap matching"
 
 ---
 
-### Task 9: LangGraph Agent Core
+### Task 10: LangGraph Agent Core
 
 **Files:**
 - Create: `src/research_agent/agent.py`
@@ -2174,7 +2570,7 @@ git commit -m "feat: LangGraph agent with router→reasoner→retriever→genera
 
 ---
 
-### Task 10: Agentic Loop (Self-Correction)
+### Task 11: Agentic Loop (Self-Correction)
 
 **Files:**
 - Create: `src/research_agent/loop.py`
@@ -2370,7 +2766,7 @@ git commit -m "feat: agentic loop with self-check, retrieval evaluation, and bou
 
 ---
 
-### Task 11: CLI Chat Interface
+### Task 12: CLI Chat Interface
 
 **Files:**
 - Create: `src/research_agent/cli.py`
@@ -2541,7 +2937,7 @@ git commit -m "feat: CLI chat interface with interactive mode and status command
 
 ---
 
-### Task 12: Skill System
+### Task 13: Skill System
 
 **Files:**
 - Create: `src/research_agent/skill.py`
@@ -2846,7 +3242,7 @@ git commit -m "feat: skill system with paper-search, literature-review, and writ
 
 ---
 
-### Task 13: Integration Test & Smoke Test
+### Task 14: Integration Test & Smoke Test
 
 **Files:**
 - Currently: `tests/test_cli.py`
@@ -2930,7 +3326,7 @@ git commit -m "test: integration tests for full chat flow and multi-project rout
 
 ---
 
-### Task 14: Final Polish & README
+### Task 15: Final Polish & README
 
 **Files:**
 - Create: `research-agent/README.md`
