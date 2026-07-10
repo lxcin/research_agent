@@ -49,7 +49,19 @@ def router_node(state: AgentState) -> AgentState:
     else:
         state.active_project = projects[0] if projects else None
 
+    from research_agent.mcp_client import load_mcp_config, connect_servers
     from research_agent.skill import load_skills, find_skill
+
+    mcp = connect_servers(load_mcp_config())
+    tools = mcp.list_tools()
+
+    for tool in tools:
+        if tool["name"] in state.user_input.lower() or any(
+            kw in state.user_input.lower() for kw in ["用工具", "调用", "mcp", "执行代码"]
+        ):
+            state.final_response = f"可用 MCP 工具: {json.dumps(tools, ensure_ascii=False, indent=2)}"
+            return state
+
     skills = load_skills()
     skill = find_skill(state.user_input, skills)
     if skill and skill.handler:

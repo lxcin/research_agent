@@ -6,7 +6,8 @@ DEFAULT_DATA_DIR = Path.home() / "research-agent-data"
 ENV_DATA_DIR = os.environ.get("RESEARCH_AGENT_DATA_DIR")
 
 def get_data_dir() -> Path:
-    path = Path(ENV_DATA_DIR) if ENV_DATA_DIR else DEFAULT_DATA_DIR
+    env_dir = os.environ.get("RESEARCH_AGENT_DATA_DIR")
+    path = Path(env_dir) if env_dir else DEFAULT_DATA_DIR
     path.mkdir(parents=True, exist_ok=True)
     return path
 
