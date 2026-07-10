@@ -86,6 +86,7 @@ class AgentState:
     active_project: Project | None = None
     all_projects: list[Project] = field(default_factory=list)
     retrieved_chunks: list[dict] = field(default_factory=list)
+    retrieved_context: list[dict] = field(default_factory=list)
     retrieval_sufficient: bool = False
     retry_count: int = 0
     final_response: str = ""
@@ -95,3 +96,27 @@ class AgentState:
     search_query: str = ""
     needs_retrieval: bool = True
     needs_compression: bool = False
+    conversation_turns: list = field(default_factory=list)
+    compressed_summaries: list[str] = field(default_factory=list)
+    round_count: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ConversationTurn:
+    id: str | None = None
+    project_id: str = ""
+    round_number: int = 0
+    user_message: str = ""
+    assistant_message: str = ""
+    timestamp: str = ""
+    compressed: bool = False
+    summary: str = ""
+
+
+@dataclass
+class Action:
+    action: str = "generate"
+    query: str = ""
+    target: str = "papers"
+    reasoning: str = ""

@@ -8,6 +8,16 @@ S2_PAPER = f"{S2_BASE}/paper"
 S2_FIELDS = "title,year,citationCount,authors,externalIds,abstract,venue,journal"
 
 
+def _extract_venue(venue):
+    if venue is None:
+        return ""
+    if isinstance(venue, dict):
+        return venue.get("name", "")
+    if isinstance(venue, str):
+        return venue
+    return str(venue)
+
+
 def search_papers(query: str, limit: int = 10, offset: int = 0) -> list[dict]:
     params = {
         "query": query,
@@ -34,7 +44,7 @@ def search_papers(query: str, limit: int = 10, offset: int = 0) -> list[dict]:
             "authors": authors_list,
             "doi": ext_ids.get("DOI", ""),
             "abstract": paper.get("abstract", ""),
-            "venue": paper.get("venue", {}).get("name", "") if paper.get("venue") else "",
+"venue": _extract_venue(paper.get("venue")),
         })
     return results
 
@@ -62,5 +72,5 @@ def get_paper_metadata(identifier: str, id_type: str = "DOI") -> dict | None:
         "authors": authors_list,
         "doi": ext_ids.get("DOI", ""),
         "abstract": paper.get("abstract", ""),
-        "venue": paper.get("venue", {}).get("name", "") if paper.get("venue") else "",
+        "venue": _extract_venue(paper.get("venue")),
     }

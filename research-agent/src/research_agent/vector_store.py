@@ -5,7 +5,7 @@ from chromadb.utils import embedding_functions
 
 from research_agent.config import get_data_dir
 
-_COLLECTION = None
+_COLLECTIONS: dict[str, chromadb.Collection] = {}
 _EMBEDDING_FN = None
 
 
@@ -16,20 +16,19 @@ def get_embedding_fn():
     return _EMBEDDING_FN
 
 
-def get_collection() -> chromadb.Collection:
-    global _COLLECTION
-    if _COLLECTION is None:
+def get_collection(name: str = "research_chunks") -> chromadb.Collection:
+    if name not in _COLLECTIONS:
         chroma_path = str(get_data_dir() / "chroma_db")
         client = chromadb.PersistentClient(path=chroma_path)
-        _COLLECTION = client.get_or_create_collection(
-            name="research_chunks",
+        _COLLECTIONS[name] = client.get_or_create_collection(
+            name=name,
             embedding_function=get_embedding_fn(),
         )
-    return _COLLECTION
+    return _COLLECTIONS[name]
 
 
-def add_chunks(paper_id: str, chunks: list[dict]):
-    coll = get_collection()
+def add_chunks(paper_id: str, chunks: list[dict], collection_name: str = "research_chunks"):
+    coll = get_collection(collection_name)
     ids = [f"{paper_id}_chunk_{c['chunk_index']}" for c in chunks]
     documents = [c["text"] for c in chunks]
     metadatas = [{"paper_id": paper_id, "chunk_index": c["chunk_index"]} for c in chunks]

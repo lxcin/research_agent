@@ -1,228 +1,147 @@
-"""LangGraph agent: router -> reasoner -> retriever -> generator with loop."""
+"""Self-implemented agent main loop."""
 import json
 from datetime import datetime
 
-import litellm
-from langgraph.graph import StateGraph, END
-
-from research_agent.models import AgentState, Project, ProjectStatus, PlanStep, PendingTask, AccumulatedWisdom
-from research_agent.store import init_db, get_all_projects, insert_project
-from research_agent.router import route_to_project, should_create_project, extract_project_topic
+from research_agent.models import AgentState, Action, Project, ProjectStatus, ConversationTurn
+from research_agent.llm import LLMProvider
+from research_agent.context import build_context
+from research_agent.guardrail import guardrail
 from research_agent.retrieval import hybrid_search, build_bm25_index
-from research_agent.loop import self_check, evaluate_retrieval_sufficiency
-from research_agent.compressor import should_compress, compress
+from research_agent.memory import store_turn, get_recent_turns, count_uncompressed_turns, mark_compressed
+from research_agent.store import init_db, get_all_projects, insert_project
+from research_agent.router import route_to_project, extract_project_topic
+from research_agent.skill import load_skills, find_skill
+
+MAX_ROUNDS = 5
 
 
-def router_node(state: AgentState) -> AgentState:
+def parse_action(raw: str) -> Action:
+    try:
+        raw = raw.strip()
+        if raw.startswith("{"):
+            data = json.loads(raw)
+        else:
+            return Action(action="generate", reasoning="non-JSON response")
+        return Action(
+            action=data.get("action", "generate"),
+            query=data.get("query", ""),
+            target=data.get("target", "papers"),
+            reasoning=data.get("reasoning", ""),
+        )
+    except (json.JSONDecodeError, KeyError):
+        return Action(action="generate", reasoning="parse error")
+
+
+def run_agent(user_input: str, llm: LLMProvider, state: AgentState) -> AgentState:
+    state.user_input = user_input
     init_db()
-    projects = get_all_projects()
 
-    if not projects:
-        state.active_project = Project(
-            topic=extract_project_topic(state.user_input),
-            status=ProjectStatus.ACTIVE,
-            created_at=datetime.now().isoformat(),
-            updated_at=datetime.now().isoformat(),
-        )
-        pid = insert_project(state.active_project)
-        state.active_project.id = pid
-        return state
+    if not state.active_project:
+        projects = get_all_projects()
+        if projects:
+            matched = route_to_project(user_input, projects)
+            if matched:
+                state.active_project = matched
+        if not state.active_project:
+            state.active_project = Project(
+                topic=extract_project_topic(user_input),
+                status=ProjectStatus.ACTIVE,
+                created_at=datetime.now().isoformat(),
+                updated_at=datetime.now().isoformat(),
+            )
+            pid = insert_project(state.active_project)
+            state.active_project.id = pid
 
-    matched = route_to_project(state.user_input, projects)
-    if matched:
-        state.active_project = matched
-    elif should_create_project(state.user_input, projects):
-        response = litellm.completion(
-            model="claude-3-haiku-20240307",
-            messages=[{"role": "user", "content": f"Extract a concise project topic (max 10 words) from this message, output ONLY the topic: {state.user_input}"}],
-            max_tokens=30,
-        )
-        topic = response.choices[0].message.content.strip()
-        state.active_project = Project(
-            topic=topic,
-            status=ProjectStatus.ACTIVE,
-            created_at=datetime.now().isoformat(),
-            updated_at=datetime.now().isoformat(),
-        )
-        pid = insert_project(state.active_project)
-        state.active_project.id = pid
-    else:
-        state.active_project = projects[0] if projects else None
-
-    from research_agent.mcp_client import load_mcp_config, connect_servers
-    from research_agent.skill import load_skills, find_skill
-
-    mcp = connect_servers(load_mcp_config())
-    tools = mcp.list_tools()
-
-    for tool in tools:
-        if tool["name"] in state.user_input.lower() or any(
-            kw in state.user_input.lower() for kw in ["用工具", "调用", "mcp", "执行代码"]
-        ):
-            state.final_response = f"可用 MCP 工具: {json.dumps(tools, ensure_ascii=False, indent=2)}"
-            return state
+    project_id = state.active_project.id if state.active_project else "default"
+    state.conversation_turns = get_recent_turns(project_id, limit=10)
 
     skills = load_skills()
-    skill = find_skill(state.user_input, skills)
+    skill = find_skill(user_input, skills)
     if skill and skill.handler:
         state = skill.handler(state)
+        _save_turn(state, project_id)
         return state
 
-    return state
+    consecutive_empty = 0
+    for round_num in range(1, MAX_ROUNDS + 1):
+        state.round_count = round_num
 
+        messages = build_context(state)
 
-def reasoner_node(state: AgentState) -> AgentState:
-    if state.retry_count >= 3:
-        return state
+        raw = llm.complete(messages, max_tokens=300)
+        action = parse_action(raw)
 
-    project_info = f"Project: {state.active_project.topic}. Summary: {state.active_project.history_summary}" if state.active_project else "No active project"
-    prompt = f"""You are a research assistant.
-{project_info}
-User message: {state.user_input}
+        if blocked := guardrail(action):
+            state.final_response = blocked
+            _save_turn(state, project_id)
+            return state
 
-Determine if you need to search the knowledge base. Output JSON:
-{{"needs_retrieval": true/false, "search_query": "concise search terms", "reasoning": "why"}}"""
+        if action.action == "retrieve":
+            if not action.query.strip():
+                state.errors = getattr(state, 'errors', []) + ["empty_query"]
+                continue
 
-    response = litellm.completion(
-        model="claude-3-haiku-20240307",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=150,
+            build_bm25_index()
+            results = hybrid_search(action.query, n_results=5)
+            if not results:
+                consecutive_empty += 1
+            else:
+                consecutive_empty = 0
+                state.retrieved_context = results
+                state.retrieved_chunks = results
+
+            if consecutive_empty >= 3:
+                action = Action(action="generate")
+            else:
+                continue
+
+        if action.action == "generate":
+            state.final_response = llm.complete(
+                build_context(state) + [{"role": "system", "content": "请基于以上检索结果生成回答。用中文回答。如果有引用来源，请标注。"}],
+                max_tokens=2000
+            )
+            if state.retrieved_context:
+                state.citations = [f"paper:{c.get('paper_id', '?')}" for c in state.retrieved_context[:5]]
+            _save_turn(state, project_id)
+            _maybe_compress(project_id, llm)
+            return state
+
+        if action.action == "stop":
+            state.final_response = "好的。"
+            _save_turn(state, project_id)
+            return state
+
+    state.final_response = llm.complete(
+        build_context(state) + [{"role": "system", "content": "请直接回答用户问题。"}],
+        max_tokens=2000
     )
-    content = response.choices[0].message.content.strip()
-    try:
-        decision = json.loads(content)
-    except json.JSONDecodeError:
-        decision = {"needs_retrieval": True, "search_query": state.user_input}
-
-    state.search_query = decision.get("search_query", state.user_input)
-    state.needs_retrieval = decision.get("needs_retrieval", True)
+    _save_turn(state, project_id)
     return state
 
 
-def retriever_node(state: AgentState) -> AgentState:
-    if not getattr(state, "needs_retrieval", True):
-        return state
-
-    query = getattr(state, "search_query", state.user_input)
-    build_bm25_index()
-    results = hybrid_search(query, n_results=10)
-    state.retrieved_chunks = results
-    state.retrieval_sufficient = evaluate_retrieval_sufficiency(state)
-    return state
+def _save_turn(state: AgentState, project_id: str):
+    round_num = len(state.conversation_turns) + 1 if hasattr(state, 'conversation_turns') else 1
+    store_turn(project_id, round_num, state.user_input, state.final_response or "")
 
 
-def generator_node(state: AgentState) -> AgentState:
-    chunks_text = "\n".join([
-        f"[{i+1}] Source: paper {c.get('paper_id', 'unknown')}, score={c.get('source_score', 'N/A')}\n"
-        f"Content: {c['text'][:500]}"
-        for i, c in enumerate(state.retrieved_chunks[:5])
-    ]) if state.retrieved_chunks else "No relevant documents found in knowledge base."
-
-    confidence_map = {"certain": "确定", "speculative": "推测", "uncertain": "不确定"}
-
-    prompt = f"""You are a research partner agent. Below is context from the knowledge base and the user's message.
-Generate a thorough, cited response. Mark your confidence level for each major claim.
-
-Current project: {state.active_project.topic if state.active_project else 'None'}
-Project history: {state.active_project.history_summary if state.active_project and state.active_project.history_summary else 'New project'}
-
-Knowledge base context:
-{chunks_text}
-
-User message: {state.user_input}
-
-Respond in Chinese. After your response, append:
----
-引用来源: [list sources by number]
-自信度: [确定/推测/不确定] - [brief reason]
-"""
-
-    response = litellm.completion(
-        model="claude-3-haiku-20240307",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=2000,
-    )
-    state.final_response = response.choices[0].message.content
-
-    state = self_check(state)
-
-    if state.retrieved_chunks:
-        state.citations = [f"paper:{c.get('paper_id', '?')}" for c in state.retrieved_chunks[:5]]
-
-    if "不确定" in state.final_response:
-        state.confidence = "uncertain"
-    elif "推测" in state.final_response:
-        state.confidence = "speculative"
-    else:
-        state.confidence = "certain"
-
-    return state
-
-
-def after_response(state: AgentState) -> str:
-    if not state.retrieval_sufficient and state.retry_count < 3:
-        state.retry_count += 1
-        return "reasoner"
-    if state.error:
-        state.retry_count += 1
-        return "reasoner" if state.retry_count < 3 else "__end__"
-
-    if should_compress(state):
-        compress(state)
-        state.needs_compression = False
-    return "__end__"
-
-
-def should_retrieve(state: AgentState) -> str:
-    if getattr(state, "needs_retrieval", True):
-        return "retriever"
-    return "generator"
-
-
-def build_graph() -> StateGraph:
-    workflow = StateGraph(AgentState)
-
-    workflow.add_node("router", router_node)
-    workflow.add_node("reasoner", reasoner_node)
-    workflow.add_node("retriever", retriever_node)
-    workflow.add_node("generator", generator_node)
-
-    workflow.set_entry_point("router")
-    workflow.add_edge("router", "reasoner")
-    workflow.add_conditional_edges("reasoner", should_retrieve, {
-        "retriever": "retriever",
-        "generator": "generator",
-    })
-    workflow.add_edge("retriever", "generator")
-    workflow.add_conditional_edges("generator", after_response, {
-        "reasoner": "reasoner",
-        "__end__": END,
-    })
-
-    return workflow
-
-
-_graph = None
-
-
-def get_graph() -> StateGraph:
-    global _graph
-    if _graph is None:
-        import sqlite3
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        from research_agent.config import get_data_dir
-        db_path = str(get_data_dir() / "checkpoint.db")
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
-        _graph = build_graph().compile(checkpointer=checkpointer)
-    return _graph
+def _maybe_compress(project_id: str, llm: LLMProvider):
+    uncompressed = count_uncompressed_turns(project_id)
+    if uncompressed > 10:
+        all_turns = get_recent_turns(project_id, limit=uncompressed)
+        old_turns = all_turns[:-5]
+        if old_turns:
+            turns_text = "\n".join([f"用户: {t.user_message}\n助手: {t.assistant_message}" for t in old_turns])
+            summary = llm.complete(
+                [{"role": "user", "content": f"将以下对话压缩为简短摘要，保留关键决策、数据、结论:\n{turns_text}"}],
+                max_tokens=200
+            )
+            mark_compressed([t.id for t in old_turns if t.id], summary)
 
 
 def process_user_input(state: AgentState, thread_id: str = "default") -> AgentState:
-    graph = get_graph()
-    config = {"configurable": {"thread_id": thread_id}}
-    result = graph.invoke(state, config)
-    return AgentState(**result) if isinstance(result, dict) else result
+    from research_agent.llm import LiteLLMProvider
+    llm = LiteLLMProvider()
+    return run_agent(state.user_input, llm, state)
 
 
 def chat(message: str, state: AgentState | None = None, thread_id: str = "default") -> AgentState:
@@ -232,6 +151,7 @@ def chat(message: str, state: AgentState | None = None, thread_id: str = "defaul
         state.user_input = message
         state.retry_count = 0
         state.retrieved_chunks = []
+        state.retrieved_context = []
         state.final_response = ""
         state.error = ""
     return process_user_input(state, thread_id=thread_id)

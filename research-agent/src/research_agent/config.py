@@ -21,3 +21,7 @@ def load_config() -> dict:
 
 def get_llm_key() -> str | None:
     return os.environ.get("RESEARCH_AGENT_LLM_KEY")
+
+
+def get_max_context_tokens() -> int:
+    return int(os.environ.get("RESEARCH_AGENT_MAX_CONTEXT_TOKENS", "4000"))

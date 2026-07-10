@@ -30,7 +30,6 @@ TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 from research_agent.models import AgentState, Project, ProjectStatus, Paper
 from research_agent.store import init_db, get_all_projects, get_all_papers, insert_project, insert_paper
-from research_agent.agent import router_node, reasoner_node, retriever_node, generator_node, build_graph, chat, process_user_input
 from research_agent.skill import load_skills, find_skill
 from research_agent.skills.paper_search import _execute_paper_search
 from research_agent.skills.literature_review import _execute_literature_review
@@ -109,15 +108,18 @@ init_db()
 
 # 1.1 Create first project
 print("\n--- 1.1 Create project 'Transformer Research' ---")
+from research_agent.agent import run_agent
+from research_agent.llm import LiteLLMProvider
+llm = LiteLLMProvider()
 state1 = AgentState(user_input="I want to study Transformer models for NLP applications")
-result1 = router_node(state1)
+result1 = run_agent(state1.user_input, llm, state1)
 assert result1.active_project is not None, "Project should be created"
 print(f"  Created project: id={result1.active_project.id}, topic='{result1.active_project.topic}'")
 
 # 1.2 Create second project in different domain
 print("\n--- 1.2 Create project 'HPLC Analysis' ---")
 state2 = AgentState(user_input="Start a new project on HPLC compound purity analysis")
-result2 = router_node(state2)
+result2 = run_agent(state2.user_input, llm, state2)
 assert result2.active_project is not None, "Project should be created"
 assert "HPLC" in result2.active_project.topic, f"Topic should contain 'HPLC', got: {result2.active_project.topic}"
 print(f"  Created project: id={result2.active_project.id}, topic='{result2.active_project.topic}'")
@@ -125,7 +127,7 @@ print(f"  Created project: id={result2.active_project.id}, topic='{result2.activ
 # 1.3 Route to existing project (keyword match via English)
 print("\n--- 1.3 Route message to existing project ---")
 state3 = AgentState(user_input="What about the Transformer attention mechanism analysis?")
-result3 = router_node(state3)
+result3 = run_agent(state3.user_input, llm, state3)
 assert result3.active_project is not None, "Should route to existing project"
 print(f"  Routed to: id={result3.active_project.id}, topic='{result3.active_project.topic}'")
 
@@ -231,11 +233,8 @@ state_q = AgentState(
     user_input="What is multi-head attention and why is it important in Transformer models?",
     active_project=result1.active_project,
 )
-# Run through the full graph
-graph = build_graph().compile()
-config = {"configurable": {"thread_id": "integration_test"}}
-full_result = graph.invoke(state_q, config)
-state_result = AgentState(**full_result) if isinstance(full_result, dict) else full_result
+full_result = run_agent(state_q.user_input, llm, state_q)
+state_result = full_result
 
 print(f"  Response length: {len(state_result.final_response)} chars")
 print(f"  Response preview: {state_result.final_response[:200]}...")

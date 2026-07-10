@@ -100,5 +100,57 @@ def status():
         click.echo("暂无项目。开始对话即可自动创建。")
 
 
+@main.command()
+@click.option("--project", default=None, help="项目ID")
+@click.option("--limit", default=20, help="显示条数")
+def history(project: str, limit: int):
+    """查看对话历史"""
+    from research_agent.memory import get_all_turns, get_recent_turns
+    from research_agent.store import init_db, get_all_projects
+
+    init_db()
+    if project:
+        turns = get_recent_turns(project, limit=limit)
+        for t in turns:
+            if t.compressed:
+                click.echo(f"  ── 已压缩 ── 摘要: {t.summary[:100]}")
+            else:
+                click.echo(f"  [{t.timestamp[:16]}] 用户: {t.user_message}")
+                if t.assistant_message:
+                    click.echo(f"  [{t.timestamp[:16]}] 助手: {t.assistant_message[:200]}")
+    else:
+        projects = get_all_projects()
+        for p in projects:
+            click.echo(f"\n项目: {p.topic}")
+            turns = get_recent_turns(p.id, limit=5)
+            for t in turns:
+                if t.compressed:
+                    click.echo(f"  ── 已压缩 ── 摘要: {t.summary[:100]}")
+                else:
+                    click.echo(f"  [{t.timestamp[:16]}] 用户: {t.user_message[:60]}")
+                    if t.assistant_message:
+                        click.echo(f"  [{t.timestamp[:16]}] 助手: {t.assistant_message[:60]}")
+
+
+@main.command()
+@click.argument("project_id")
+def review(project_id: str):
+    """复盘项目进度"""
+    from research_agent.store import get_project
+    from research_agent.progress import review_project
+    from research_agent.llm import LiteLLMProvider
+
+    project = get_project(project_id)
+    if not project:
+        click.echo(f"项目 {project_id} 不存在")
+        return
+
+    llm = LiteLLMProvider()
+    project = review_project(project, llm)
+    click.echo(f"项目: {project.topic}")
+    click.echo(f"进度: {project.history_summary}")
+    click.echo(f"更新时间: {project.updated_at}")
+
+
 if __name__ == "__main__":
     main()

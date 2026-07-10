@@ -30,6 +30,8 @@ Agent: 建议每次调温后平衡15分钟再进样。柱温每升10°C保留时
 def test_compress_triggers_update(mock_completion, temp_data_dir):
     from research_agent.store import init_db, insert_project
 
+    init_db()
+
     mock_completion.return_value = MagicMock(
         choices=[MagicMock(message=MagicMock(content='{"history_summary": "Discussed HPLC optimization", '
         '"sops": ["Standard HPLC流程: C18柱，甲醇:水=70:30，1mL/min，254nm"], '

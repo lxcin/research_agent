@@ -7,11 +7,11 @@ from research_agent.vector_store import get_collection
 
 
 @lru_cache(maxsize=1)
-def _get_bm25() -> tuple[BM25Okapi, list[dict]]:
+def _get_bm25() -> tuple[BM25Okapi | None, list[dict]]:
     coll = get_collection()
     chunks = coll.get()
     if not chunks["documents"]:
-        return BM25Okapi([]), []
+        return None, []
     tokenized = [doc.split() for doc in chunks["documents"]]
     bm25 = BM25Okapi(tokenized)
     all_data = [
@@ -63,7 +63,7 @@ def _vector_search(query: str, n_results: int) -> list[dict]:
 
 def _bm25_search(query: str, n_results: int) -> list[dict]:
     bm25, all_data = _get_bm25()
-    if not all_data:
+    if not all_data or bm25 is None:
         return []
     tokenized_query = query.split()
     scores = bm25.get_scores(tokenized_query)
