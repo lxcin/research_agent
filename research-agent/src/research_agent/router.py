@@ -1,5 +1,14 @@
 """Project auto-routing: match user input to existing projects or detect new ones."""
+import jieba
+
 from research_agent.models import Project
+
+
+def _tokenize(text: str) -> set[str]:
+    """Tokenize text. Uses jieba for Chinese, space-split for non-Chinese."""
+    if any('\u4e00' <= c <= '\u9fff' for c in text):
+        return set(jieba.cut(text))
+    return set(text.lower().split())
 
 
 def _compute_match_score(user_input: str, project: Project) -> float:
@@ -8,8 +17,8 @@ def _compute_match_score(user_input: str, project: Project) -> float:
     topic_lower = project.topic.lower()
 
     score = 0.0
-    topic_words = set(topic_lower.split())
-    input_words = set(input_lower.split())
+    topic_words = _tokenize(topic_lower)
+    input_words = _tokenize(input_lower)
 
     # Exact word overlap
     overlap = topic_words & input_words

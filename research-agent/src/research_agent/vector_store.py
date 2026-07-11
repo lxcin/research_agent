@@ -1,19 +1,43 @@
 """Chroma vector database wrapper."""
 import os
 import chromadb
-from chromadb.utils import embedding_functions
 
 from research_agent.config import get_data_dir
 
 _COLLECTIONS: dict[str, chromadb.Collection] = {}
 _EMBEDDING_FN = None
+_EMBEDDING_MODEL = None
 
 
-def get_embedding_fn():
-    global _EMBEDDING_FN
-    if _EMBEDDING_FN is None:
-        _EMBEDDING_FN = embedding_functions.DefaultEmbeddingFunction()
-    return _EMBEDDING_FN
+def get_embedding_model():
+    global _EMBEDDING_MODEL
+    if _EMBEDDING_MODEL is None:
+        from sentence_transformers import SentenceTransformer
+        model_name = os.environ.get("RESEARCH_AGENT_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+        try:
+            _EMBEDDING_MODEL = SentenceTransformer(model_name, local_files_only=True)
+        except Exception:
+            try:
+                _EMBEDDING_MODEL = SentenceTransformer(model_name)
+            except Exception:
+                from chromadb.utils import embedding_functions
+                _EMBEDDING_FN = embedding_functions.DefaultEmbeddingFunction()
+                return None
+    return _EMBEDDING_MODEL
+
+
+def get_embedding_function():
+    """Return a Chroma-compatible embedding function."""
+    model = get_embedding_model()
+    if model is None:
+        return _EMBEDDING_FN
+    from chromadb import EmbeddingFunction
+
+    class STEmbedding(EmbeddingFunction):
+        def __call__(self, input):
+            return model.encode(input).tolist()
+
+    return STEmbedding()
 
 
 def get_collection(name: str = "research_chunks") -> chromadb.Collection:
@@ -22,7 +46,7 @@ def get_collection(name: str = "research_chunks") -> chromadb.Collection:
         client = chromadb.PersistentClient(path=chroma_path)
         _COLLECTIONS[name] = client.get_or_create_collection(
             name=name,
-            embedding_function=get_embedding_fn(),
+            embedding_function=get_embedding_function(),
         )
     return _COLLECTIONS[name]
 

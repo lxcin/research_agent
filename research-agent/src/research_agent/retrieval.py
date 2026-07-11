@@ -1,9 +1,22 @@
 """Hybrid retrieval: vector search + BM25 keyword search + RRF fusion."""
 from functools import lru_cache
 
+import jieba
 from rank_bm25 import BM25Okapi
 
 from research_agent.vector_store import get_collection
+
+
+def _tokenize_doc(text: str) -> list[str]:
+    if any('\u4e00' <= c <= '\u9fff' for c in text):
+        return list(jieba.cut(text))
+    return text.split()
+
+
+def _tokenize_query(query: str) -> list[str]:
+    if any('\u4e00' <= c <= '\u9fff' for c in query):
+        return list(jieba.cut(query))
+    return query.split()
 
 
 @lru_cache(maxsize=1)
@@ -12,7 +25,7 @@ def _get_bm25() -> tuple[BM25Okapi | None, list[dict]]:
     chunks = coll.get()
     if not chunks["documents"]:
         return None, []
-    tokenized = [doc.split() for doc in chunks["documents"]]
+    tokenized = [_tokenize_doc(doc) for doc in chunks["documents"]]
     bm25 = BM25Okapi(tokenized)
     all_data = [
         {"text": chunks["documents"][i],
@@ -65,7 +78,7 @@ def _bm25_search(query: str, n_results: int) -> list[dict]:
     bm25, all_data = _get_bm25()
     if not all_data or bm25 is None:
         return []
-    tokenized_query = query.split()
+    tokenized_query = _tokenize_query(query)
     scores = bm25.get_scores(tokenized_query)
     indexed_scores = list(enumerate(scores))
     indexed_scores.sort(key=lambda x: x[1], reverse=True)

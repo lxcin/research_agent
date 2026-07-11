@@ -195,5 +195,41 @@ def review(project_id: str):
     click.echo(f"更新时间: {project.updated_at}")
 
 
+@main.command()
+@click.option("--project", default=None, help="项目ID或名称")
+def resume(project: str):
+    """恢复等待中的项目"""
+    from research_agent.store import init_db, get_all_projects
+    from research_agent.models import ProjectStatus
+
+    init_db()
+    projects = get_all_projects()
+    waiting = [p for p in projects if p.status == ProjectStatus.WAITING]
+
+    if not waiting:
+        click.echo("没有等待中的项目。")
+        return
+
+    if project:
+        target = None
+        for p in waiting:
+            if project.lower() in p.topic.lower() or project == p.id:
+                target = p
+                break
+        if not target:
+            click.echo(f"未找到等待中的项目: {project}")
+            return
+        waiting = [target]
+
+    for p in waiting:
+        click.echo(f"\n项目: {p.topic}")
+        if p.pending_task:
+            click.echo(f"  等待事项: {p.pending_task.description[:100]}")
+            if p.pending_task.expected_time:
+                click.echo(f"  预期时间: {p.pending_task.expected_time}")
+        if p.history_summary:
+            click.echo(f"  项目摘要: {p.history_summary[:200]}")
+
+
 if __name__ == "__main__":
     main()

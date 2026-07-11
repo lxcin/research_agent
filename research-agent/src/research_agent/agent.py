@@ -2,18 +2,43 @@
 import json
 from datetime import datetime
 
-from research_agent.models import AgentState, Action, Project, ProjectStatus, ConversationTurn
+from research_agent.models import AgentState, Action, Project, ProjectStatus, ConversationTurn, PendingTask
 from research_agent.llm import LLMProvider
 from research_agent.context import build_context
 from research_agent.guardrail import guardrail
 from research_agent.retrieval import hybrid_search, build_bm25_index
 from research_agent.memory import store_turn, get_recent_turns, count_uncompressed_turns, mark_compressed
-from research_agent.store import init_db, get_all_projects, insert_project
+from research_agent.store import init_db, get_all_projects, insert_project, update_project
 from research_agent.router import route_to_project, extract_project_topic
 from research_agent.skill import load_skills, find_skill
 from research_agent.validate import validate_response
 
 MAX_ROUNDS = 5
+
+
+def _build_resume_message(project: Project) -> str:
+    """Build resume context when user returns to a WAITING project."""
+    parts = [f"欢迎回来！项目「{project.topic}」之前处于等待状态。"]
+    if project.pending_task:
+        parts.append(f"等待事项: {project.pending_task.description}")
+        if project.pending_task.expected_time:
+            parts.append(f"预期时间: {project.pending_task.expected_time}")
+    if project.history_summary:
+        parts.append(f"项目摘要: {project.history_summary}")
+    return "\n".join(parts)
+
+
+def _detect_pending_task(response: str) -> PendingTask | None:
+    """Detect if the response asks the user to perform an action."""
+    indicators = [
+        "需要你", "请你", "你来", "你自己", "手动", "等待你",
+        "等你", "你来做", "需要你完成", "需要实验",
+    ]
+    for ind in indicators:
+        if ind in response:
+            desc = response[:200]
+            return PendingTask(description=desc, expected_time="")
+    return None
 
 
 def parse_action(raw: str) -> Action:
@@ -62,6 +87,12 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState) -> AgentStat
             )
             pid = insert_project(state.active_project)
             state.active_project.id = pid
+
+    if state.active_project and state.active_project.status == ProjectStatus.WAITING:
+        resume_msg = _build_resume_message(state.active_project)
+        state.user_input = resume_msg + "\n用户: " + user_input
+        state.active_project.status = ProjectStatus.ACTIVE
+        update_project(state.active_project)
 
     project_id = state.active_project.id if state.active_project else "default"
     state.conversation_turns = get_recent_turns(project_id, limit=10)
@@ -114,6 +145,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState) -> AgentStat
             state = validate_response(state)
             _save_turn(state, project_id)
             _maybe_compress(project_id, llm)
+            _mark_waiting_if_needed(state)
             return state
 
         if action.action == "stop":
@@ -127,6 +159,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState) -> AgentStat
     )
     state = validate_response(state)
     _save_turn(state, project_id)
+    _mark_waiting_if_needed(state)
     return state
 
 
@@ -147,6 +180,15 @@ def _maybe_compress(project_id: str, llm: LLMProvider):
                 max_tokens=200
             )
             mark_compressed([t.id for t in old_turns if t.id], summary)
+
+
+def _mark_waiting_if_needed(state: AgentState):
+    if state.final_response and state.active_project:
+        task = _detect_pending_task(state.final_response)
+        if task:
+            state.active_project.status = ProjectStatus.WAITING
+            state.active_project.pending_task = task
+            update_project(state.active_project)
 
 
 def process_user_input(state: AgentState, thread_id: str = "default") -> AgentState:
