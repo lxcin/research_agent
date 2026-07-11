@@ -11,12 +11,23 @@ def temp_data_dir(monkeypatch):
     """Redirect data dir to temp for tests. Also reset global DB/collection state."""
     import research_agent.store as store_mod
     import research_agent.vector_store as vs_mod
+    if store_mod._DB is not None:
+        try:
+            store_mod._DB.close()
+        except Exception:
+            pass
     store_mod._DB = None
     vs_mod._COLLECTIONS.clear()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         monkeypatch.setenv("RESEARCH_AGENT_DATA_DIR", tmpdir)
         yield Path(tmpdir)
+        if store_mod._DB is not None:
+            try:
+                store_mod._DB.close()
+            except Exception:
+                pass
+            store_mod._DB = None
 
 
 @pytest.fixture

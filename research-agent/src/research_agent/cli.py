@@ -133,6 +133,49 @@ def history(project: str, limit: int):
 
 
 @main.command()
+@click.option("--paper", default=None, help="论文ID或标题")
+def graph(paper: str):
+    """查看知识图谱"""
+    from research_agent.knowledge_graph import load_graph, build_paper_argument_tree
+    from research_agent.llm import LiteLLMProvider
+    from research_agent.store import get_all_papers, init_db
+
+    init_db()
+    if paper:
+        papers = get_all_papers()
+        target = None
+        for p in papers:
+            if paper.lower() in p.title.lower() or paper == p.id:
+                target = p
+                break
+        if not target:
+            click.echo(f"论文 '{paper}' 未找到")
+            return
+        from research_agent.ingestion import recall_full_paper
+        text = recall_full_paper(target.id)
+        llm = LiteLLMProvider()
+        tree = build_paper_argument_tree(target.id, text, llm)
+        _print_tree(tree["tree"])
+    else:
+        kg = load_graph()
+        click.echo(f"全局图谱: {len(kg.graph.nodes)} 个观点, {len(kg.graph.edges)} 条关系")
+        for node_id in kg.graph.nodes:
+            node = kg.graph.nodes[node_id]
+            claim = node["claim"]
+            click.echo(f"  [{claim.claim_type}] {claim.text[:80]}")
+
+
+def _print_tree(node, indent=0):
+    prefix = "  " * indent
+    if "thesis" in node:
+        click.echo(f"{prefix}核心论点: {node['thesis']}")
+    if "text" in node:
+        click.echo(f"{prefix}├── [{node.get('type', 'claim')}] {node['text']}")
+    for child in node.get("children", []):
+        _print_tree(child, indent + 1)
+
+
+@main.command()
 @click.argument("project_id")
 def review(project_id: str):
     """复盘项目进度"""
