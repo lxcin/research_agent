@@ -43,8 +43,18 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState) -> AgentStat
             if matched:
                 state.active_project = matched
         if not state.active_project:
+            topic = extract_project_topic(user_input)
+            if len(topic) > 20:
+                try:
+                    resp = llm.complete(
+                        [{"role": "user", "content": f"Extract a concise project topic (max 5 words) from: {topic}\nOutput ONLY the topic name."}],
+                        max_tokens=30,
+                    )
+                    topic = resp.strip()
+                except Exception:
+                    topic = topic[:40]
             state.active_project = Project(
-                topic=extract_project_topic(user_input),
+                topic=topic,
                 status=ProjectStatus.ACTIVE,
                 created_at=datetime.now().isoformat(),
                 updated_at=datetime.now().isoformat(),

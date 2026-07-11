@@ -64,4 +64,5 @@ def extract_project_topic(user_input: str) -> str:
         if idx >= 0:
             topic = topic[idx + len(ind):]
             break
-    return topic.strip("，,：:。. ")
+    topic = topic.strip("，,：:。. ")
+    return topic
