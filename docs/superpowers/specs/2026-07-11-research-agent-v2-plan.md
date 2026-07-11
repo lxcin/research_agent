@@ -34,23 +34,192 @@
 
 ### 模块 G：知识图谱（P0，V2 核心）
 
-**概述**：从"检索段落"升级到"理解论证结构"。
+**概述**：从"检索段落"升级到"理解论证结构"。知识图谱分为两层：全局图谱和单篇论文图谱。
 
-**子模块**：
+#### G1. 全局知识图谱（自动维护）
 
-| 子模块 | 内容 | 技术 |
-|--------|------|------|
-| G1. 论文内论证图 | Claim → Evidence → Premise，LLM 抽取 + 确定性校验 | `networkx` |
-| G2. 论文间引用图 | 引用关系 + 学派聚类 + 争议检测 | `networkx` + Leiden |
-| G3. 图增强检索 | 检索命中 chunk → 导航到关联 Claim → 发现矛盾/支持证据 | 图游走 + RAG |
-| G4. 图可视化 | `research-agent graph --paper "Attention Is All You Need"` 输出论证结构 | `matplotlib` 或终端 ASCII |
+**触发**：每篇论文摄入时自动抽取 Claim 并加入全局图。无需用户干预。
 
-**设计原则**：
-- 图构建是离线的（论文摄入时），检索时只读图，不加重检索延迟
-- 图节点用 Chroma 嵌入，图边用 NetworkX 存储
-- 图检索和文本检索混合：先搜文本 chunk → 通过 chunk 的 paper_id 查图 → 获取关联节点
+**结构**：
 
-**V1 数据兼容**：Paper 表 + Chunk 表不变，新增 Claim 表 + Relation 表。
+```
+┌─────────────────────────────────────────────────────────┐
+│                    全局知识图谱                           │
+│                                                         │
+│   Paper A: Attention Is All You Need                     │
+│   ├── Claim: "Scaled dot-product attention is faster"   │
+│   │   ├── Evidence: 实验对比 RNN/CNN                      │
+│   │   └── supports → Paper B: BERT 也用了                │
+│   ├── Claim: "Multi-head attention improves diversity"  │
+│   │   └── contradicts → Paper C: 单头更高效 (特定场景)      │
+│                                                         │
+│   Paper B: BERT: Pre-training of Deep Bidirectional      │
+│   ├── Claim: "MLM enables bidirectional context"        │
+│   │   └── extends → Paper A: 单向→双向 attention          │
+│   └── Claim: "NSP improves sentence-level tasks"        │
+│                                                         │
+│   Paper C: Efficient Attention: Is One Head Enough?      │
+│   └── Claim: "Single head sufficient for short text"    │
+│       └── contradicts → Paper A: multi-head claim        │
+└─────────────────────────────────────────────────────────┘
+```
+
+**数据模型**：
+
+```python
+@dataclass
+class Claim:
+    id: str
+    paper_id: str          # 所属论文
+    text: str              # 主张内容
+    type: str              # claim / evidence / method / result
+    confidence: float      # LLM 抽取置信度
+
+@dataclass
+class Relation:
+    source_claim_id: str
+    target_claim_id: str
+    relation_type: str     # supports / contradicts / extends / cites
+    paper_id_a: str        # 跨论文关联时用
+    paper_id_b: str
+```
+
+**自动构建流程**（论文摄入时触发）：
+
+```
+论文摄入
+  │
+  ├── 1. 文本分块 → Chroma（已有）
+  │
+  ├── 2. LLM 抽取 Claim（新增）
+  │     "从这篇论文中提取关键主张，每条包含：主张内容、类型、支持证据"
+  │     → [{text: "...", type: "claim", evidence: "..."}, ...]
+  │
+  ├── 3. 确定性校验（新增）
+  │     - Claim 是否在原文中可定位？（正则回溯）
+  │     - Claim 是否与已有 Claim 重复？（向量相似度 > 0.9 → 合并）
+  │
+  ├── 4. 加入全局图（新增）
+  │     - 新 Claim → 新节点
+  │     - 与已有 Claim 的关系 → LLM 判断 + 确定性校验
+  │
+  └── 5. 嵌入 Claim 节点（新增）
+        - 每个 Claim 存 Chroma，供后续图检索
+```
+
+#### G2. 单篇论文知识图谱（用户显式触发）
+
+**触发条件**（满足任一）：
+- 用户说 "分析这篇论文的论证结构" / "梳理一下这篇文章的论点"
+- 用户讨论完一篇论文后说 "总结一下它的论证逻辑"
+
+**输出格式**：
+
+```
+Attention Is All You Need — 论证结构
+
+核心论点:
+  Transformer 模型完全基于 attention 机制，无需 RNN/CNN
+
+├── 子论点 1: Scaled dot-product attention 计算效率高
+│   ├── 证据: 与 RNN 对比，训练时间从 3.5 天降到 12 小时
+│   └── 前提: 序列长度 < 模型维度时，attention 比 RNN 快
+
+├── 子论点 2: Multi-head attention 捕捉多角度信息
+│   ├── 证据: 消融实验，8 头 > 1 头，BLEU 提升 0.5
+│   └── 前提: 不同 head 学习不同的 attention pattern
+
+├── 子论点 3: 位置编码替代序列结构
+│   ├── 证据: 对比 learned vs sinusoidal，效果相当
+│   └── 前提: 位置信息对序列建模是必要的
+
+└── 实验验证: WMT 2014 EN-DE 28.4 BLEU，SOTA
+    ├── 对比: 之前的 SOTA 26.0 BLEU
+    └── 局限: 长序列（>512 token）退化为 O(n²)
+```
+
+**与 G1 的关系**：G2 是 G1 的子集放大。G1 自动维护 Claim 节点，G2 在用户要求时把一篇论文的 Claim 组织成树状论证结构。
+
+#### G3. 图增强检索
+
+**检索流程**：
+
+```
+用户: "attention 机制和 RNN 哪个更快？"
+  │
+  ├── 1. 文本检索（已有）→ chunk: "attention is faster than RNN"
+  │
+  ├── 2. 图检索（新增）
+  │     通过 chunk 的 paper_id → 查全局图 → 获取关联 Claim
+  │     → Attention Is All You Need 的 Claim: "训练时间从 3.5 天降到 12 小时"
+  │     → BERT 的 Claim: "双向 attention 比单向慢 2x 但效果好"
+  │
+  ├── 3. 矛盾检测（新增）
+  │     → Efficient Attention 的 Claim: "单头在短文本上更快"
+  │     → 标记为 "存在争议"
+  │
+  └── 4. 生成回答
+       "Attention 比 RNN 快（训练 12h vs 3.5 天），但存在争议：
+        有论文认为单头 attention 在短文本上更快..."
+```
+
+#### G4. 可视化（P2，后续前端 UI）
+
+**短期（终端）**：
+
+```bash
+# 全局图谱概览
+$ research-agent graph
+  ┌─ Attention Is All You Need (2017) ─── extends ─── BERT (2019)
+  │       │                                              │
+  │       ├── supports ── Efficient Attention (2020) ──┘
+  │       │
+  │       └── contradicts ── Sparse Transformer (2019)
+
+# 单篇论文论证结构
+$ research-agent graph --paper "Attention Is All You Need"
+  (输出 ASCII 树状图)
+
+# 跨论文关系
+$ research-agent graph --relation "Attention Is All You Need" "BERT"
+  extends: BERT 的 MLM 将单向 attention 扩展为双向
+```
+
+**长期（前端 UI）**：简单 Web 界面（FastAPI + 前端），思维导图风格可视化。
+
+#### 技术选型
+
+| 组件 | 技术 |
+|------|------|
+| 图存储 | `networkx` + SQLite（节点和边存关系表） |
+| Claim 嵌入 | Chroma（复用现有向量库） |
+| LLM 抽取 | `LiteLLMProvider`（复用现有抽象） |
+| 矛盾检测 | 向量相似度 + LLM 判断 + 确定性校验 |
+| 可视化 | 终端 ASCII → 后续 FastAPI + D3.js |
+
+#### V1 数据兼容
+
+`Paper` 表 + `Chunk` 表不变，新增：
+
+```sql
+CREATE TABLE claims (
+    id TEXT PRIMARY KEY,
+    paper_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    type TEXT NOT NULL,       -- claim / evidence / method / result
+    confidence REAL DEFAULT 0.0,
+    embedding_id TEXT         -- Chroma 中的嵌入 ID
+);
+
+CREATE TABLE relations (
+    id TEXT PRIMARY KEY,
+    source_claim_id TEXT NOT NULL,
+    target_claim_id TEXT NOT NULL,
+    relation_type TEXT NOT NULL,  -- supports / contradicts / extends / cites
+    source_paper_id TEXT,
+    target_paper_id TEXT
+);
+```
 
 ### 模块 H：中文原生支持（P0）
 
@@ -146,13 +315,31 @@ $ research-agent skill list
   rdkit-calc        第三方  分子计算
 ```
 
+### 模块 O：前端 UI 可视化（P2）
+
+**概述**：为知识图谱和项目计划提供简单 Web 界面。
+
+**技术**：FastAPI + 简单前端（D3.js 或 Cytoscape.js）。
+
+**页面**：
+
+| 页面 | 内容 |
+|------|------|
+| 全局图谱 | 思维导图风格，展示所有论文的 Claim 节点和关系边 |
+| 单篇论文 | 点击论文 → 展开论证树（Claim → Evidence → Premise） |
+| 项目仪表盘 | 所有项目状态、等待事项、进度时间线 |
+| 研究计划 | 步骤列表 + 依赖关系图 + 责任人标记 |
+
+**第一版（终端）**：`research-agent graph` 输出 ASCII 图。
+**第二版（Web）**：`research-agent serve` 启动本地 Web 服务。
+
 ---
 
 ## 四、优先级总结
 
 | 优先级 | 模块 | 预计工作量 | 价值 |
 |--------|------|-----------|------|
-| **P0** | G. 知识图谱 | 大（3-4 天） | 核心差异化 |
+| **P0** | G. 知识图谱 | 大（3-4 天） | 核心差异化，全局自动 + 单篇按需 |
 | **P0** | H. 中文支持 | 小（半天） | 目标用户刚需 |
 | **P0** | I. 断点续研 | 小（半天） | 已有基础设施，串起来即可 |
 | **P1** | J. 跨项目联想 | 中（1 天） | 知识图谱的自然延伸 |
@@ -160,6 +347,7 @@ $ research-agent skill list
 | **P1** | L. 可配置模型 | 小（半天） | 开发和部署都受益 |
 | **P2** | M. 评估增强 | 中（1 天） | 图评估需要 G 先完成 |
 | **P2** | N. Skill 插件 | 中（1 天） | 生态扩展 |
+| **P2** | O. 前端 UI 可视化 | 大（2-3 天） | 知识图谱 + 项目仪表盘 |
 
 ---
 
@@ -170,13 +358,15 @@ V1:  用户 → CLI → Agent Loop → RAG → 回答
                      ↓
                   护栏 + 幻觉检测
 
-V2:  用户 → CLI → Agent Loop → RAG + 知识图谱 → 回答
-                     ↓              ↓
-                  护栏 + 幻觉检测   论证推理
-                     ↓
-         断点续研 + 跨项目联想 + 研究方向研判
-                     ↓
-                可配置模型 + 中文支持
+V2:  用户 → CLI / Web UI → Agent Loop → RAG + 知识图谱 → 回答
+                            ↓              ↓
+                         护栏 + 幻觉检测   论证推理
+                            ↓              ↓
+                    断点续研 + 跨项目联想   全局图谱（自动）
+                            ↓              ↓
+                    研究方向研判         单篇图谱（按需）
+                            ↓
+                       可配置模型 + 中文支持
 ```
 
 ---
