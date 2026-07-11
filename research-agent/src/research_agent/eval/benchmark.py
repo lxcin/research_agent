@@ -1,6 +1,6 @@
 """Benchmark datasets for RAG evaluation."""
 
-# 3 domains, 3 papers each, 3 ground-truth facts per paper
+# 5 domains, 3 papers each, 4+ ground-truth facts per domain
 BENCHMARK_DOMAINS = {
     "attention_mechanism": {
         "query": "attention mechanism in transformers",
@@ -41,6 +41,80 @@ BENCHMARK_DOMAINS = {
             {"fact": "The standard Transformer receives as input a 1D sequence of token embeddings, while ViT handles 2D images", "paper_idx": 2,
              "queries": ["How does ViT differ from standard Transformer?", "ViT input format",
                          "Difference between text Transformer and image Transformer"]},
+        ],
+    },
+    "graph_neural_networks": {
+        "query": "graph neural networks",
+        "seed_papers": [
+            "Semi-Supervised Classification with Graph Convolutional Networks",
+            "Graph Attention Networks",
+            "Inductive Representation Learning on Large Graphs",
+        ],
+        "ground_truth": [
+            {"fact": "GCN uses a layer-wise propagation rule based on first-order approximation of spectral graph convolutions", "paper_idx": 0,
+             "queries": ["How does GCN work?", "GCN propagation rule", "What is graph convolution?"]},
+            {"fact": "GAT uses masked self-attention layers to assign different weights to different nodes in a neighborhood", "paper_idx": 1,
+             "queries": ["How does GAT work?", "What is graph attention?", "GAT attention mechanism"]},
+            {"fact": "GraphSAGE learns a function that generates embeddings by sampling and aggregating features from a node's local neighborhood", "paper_idx": 2,
+             "queries": ["How does GraphSAGE work?", "GraphSAGE sampling method", "What is inductive graph learning?"]},
+            {"fact": "GCN achieved state-of-the-art classification accuracy on Cora, Citeseer, and Pubmed datasets", "paper_idx": 0,
+             "queries": ["GCN benchmark results", "GCN performance on datasets", "What accuracy did GCN achieve?"]},
+            {"fact": "GAT outperforms GCN on Cora, Citeseer, and Pubmed citation network benchmarks", "paper_idx": 1,
+             "queries": ["GAT vs GCN performance", "GAT benchmark results", "Does GAT outperform GCN?"]},
+        ],
+    },
+    "protein_structure": {
+        "query": "protein structure prediction",
+        "seed_papers": [
+            "Highly accurate protein structure prediction with AlphaFold",
+            "Improved protein structure prediction using potentials from deep learning",
+            "Accurate prediction of protein structures and interactions using a three-track neural network",
+        ],
+        "ground_truth": [
+            {"fact": "AlphaFold uses a novel neural network architecture based on multiple sequence alignments and iterative refinement", "paper_idx": 0,
+             "queries": ["How does AlphaFold work?", "AlphaFold architecture", "What is AlphaFold's approach?"]},
+            {"fact": "AlphaFold achieved median GDT of 92.4 in CASP14, competitive with experimental methods", "paper_idx": 0,
+             "queries": ["AlphaFold CASP14 results", "AlphaFold accuracy", "How accurate is AlphaFold?"]},
+            {"fact": "DeepPotential uses deep learning to predict inter-residue distances and orientations for protein structure prediction", "paper_idx": 1,
+             "queries": ["How does DeepPotential work?", "DeepPotential method", "Deep learning for protein structure"]},
+            {"fact": "RoseTTAFold uses a three-track architecture processing 1D sequence, 2D distance, and 3D coordinate information simultaneously", "paper_idx": 2,
+             "queries": ["How does RoseTTAFold work?", "RoseTTAFold architecture", "What is three-track neural network?"]},
+        ],
+    },
+    "reinforcement_learning": {
+        "query": "reinforcement learning",
+        "seed_papers": [
+            "Playing Atari with Deep Reinforcement Learning",
+            "Human-level control through deep reinforcement learning",
+            "Proximal Policy Optimization Algorithms",
+        ],
+        "ground_truth": [
+            {"fact": "DQN uses a deep convolutional neural network to approximate the optimal action-value function", "paper_idx": 0,
+             "queries": ["How does DQN work?", "DQN architecture", "What is deep Q-learning?"]},
+            {"fact": "DQN uses experience replay and target network to stabilize training", "paper_idx": 0,
+             "queries": ["DQN experience replay", "DQN training stability", "How does DQN stabilize training?"]},
+            {"fact": "PPO uses a clipped surrogate objective to prevent destructively large policy updates", "paper_idx": 2,
+             "queries": ["How does PPO work?", "PPO clipped objective", "What is PPO's key innovation?"]},
+            {"fact": "Nature DQN achieved human-level performance on 49 Atari games", "paper_idx": 1,
+             "queries": ["DQN Atari results", "DQN human-level performance", "How many games did DQN master?"]},
+        ],
+    },
+    "drug_discovery": {
+        "query": "AI in drug discovery",
+        "seed_papers": [
+            "A Deep Learning Approach to Antibiotic Discovery",
+            "Improved protein-ligand binding affinity prediction with structure-based deep learning",
+            "MoleculeNet: a benchmark for molecular machine learning",
+        ],
+        "ground_truth": [
+            {"fact": "Deep learning was used to discover halicin, a novel antibiotic compound effective against drug-resistant bacteria", "paper_idx": 0,
+             "queries": ["How was halicin discovered?", "AI antibiotic discovery", "Deep learning drug discovery method"]},
+            {"fact": "Structure-based deep learning methods can predict protein-ligand binding affinities with high accuracy", "paper_idx": 1,
+             "queries": ["Protein-ligand binding prediction", "Deep learning binding affinity", "Structure-based drug discovery"]},
+            {"fact": "MoleculeNet provides standardized benchmarks for molecular machine learning across multiple datasets and tasks", "paper_idx": 2,
+             "queries": ["What is MoleculeNet?", "Molecular machine learning benchmark", "MoleculeNet datasets"]},
+            {"fact": "The antibiotic discovery model screened over 100 million molecules to identify halicin", "paper_idx": 0,
+             "queries": ["How many molecules were screened?", "Antibiotic discovery screening scale", "Halicin discovery process"]},
         ],
     },
 }

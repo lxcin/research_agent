@@ -32,12 +32,13 @@ def test_compute_metrics_miss():
     assert result.mrr == 0.0
 
 
-def test_benchmark_structure():
+def test_benchmark_all_domains():
     from research_agent.eval.benchmark import BENCHMARK_DOMAINS
-    for domain, data in BENCHMARK_DOMAINS.items():
-        assert "seed_papers" in data
-        assert "ground_truth" in data
-        for gt in data["ground_truth"]:
+    assert len(BENCHMARK_DOMAINS) == 5
+    for name, domain in BENCHMARK_DOMAINS.items():
+        assert len(domain["seed_papers"]) >= 3, f"{name} should have >=3 papers"
+        assert len(domain["ground_truth"]) >= 4, f"{name} should have >=4 facts"
+        for gt in domain["ground_truth"]:
             assert "fact" in gt
             assert "queries" in gt
             assert len(gt["queries"]) >= 2

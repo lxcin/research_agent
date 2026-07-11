@@ -8,12 +8,19 @@ class LLMProvider(ABC):
 
 
 class LiteLLMProvider(LLMProvider):
-    def __init__(self, model: str = "claude-3-haiku-20240307"):
-        self.model = model
+    def __init__(self, model: str | None = None):
+        from research_agent.config import get_model_config
+        cfg = get_model_config()
+        self.model = model or cfg.get("name", "claude-3-haiku-20240307")
+        self.api_base = cfg.get("api_base")
 
     def complete(self, messages: list[dict], **kwargs) -> str:
         import litellm
-        resp = litellm.completion(model=self.model, messages=messages, **kwargs)
+        call_kwargs = {"model": self.model, "messages": messages}
+        call_kwargs.update(kwargs)
+        if self.api_base:
+            call_kwargs["api_base"] = self.api_base
+        resp = litellm.completion(**call_kwargs)
         return resp.choices[0].message.content
 
 
