@@ -11,6 +11,7 @@ from research_agent.memory import store_turn, get_recent_turns, count_uncompress
 from research_agent.store import init_db, get_all_projects, insert_project
 from research_agent.router import route_to_project, extract_project_topic
 from research_agent.skill import load_skills, find_skill
+from research_agent.validate import validate_response
 
 MAX_ROUNDS = 5
 
@@ -110,8 +111,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState) -> AgentStat
                 build_context(state) + [{"role": "system", "content": "请基于以上检索结果生成回答。用中文回答。如果有引用来源，请标注。"}],
                 max_tokens=2000
             )
-            if state.retrieved_context:
-                state.citations = [f"paper:{c.get('paper_id', '?')}" for c in state.retrieved_context[:5]]
+            state = validate_response(state)
             _save_turn(state, project_id)
             _maybe_compress(project_id, llm)
             return state
@@ -125,6 +125,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState) -> AgentStat
         build_context(state) + [{"role": "system", "content": "请直接回答用户问题。"}],
         max_tokens=2000
     )
+    state = validate_response(state)
     _save_turn(state, project_id)
     return state
 
