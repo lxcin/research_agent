@@ -310,15 +310,24 @@ async def delete_paper(paper_id: str):
 
 @app.post("/api/upload/pdf")
 async def upload_pdf(file: UploadFile = File(...)):
-    if not file.filename or not file.filename.endswith('.pdf'):
-        raise HTTPException(400, "Only PDF files allowed")
-    from research_agent.ingestion import ingest_pdf
+    ext = (file.filename or "").lower().rsplit(".", 1)[-1] if "." in (file.filename or "") else ""
+    if ext not in ("pdf", "md", "txt"):
+        raise HTTPException(400, "Only PDF, Markdown (.md) and text (.txt) files allowed")
+
+    from research_agent.ingestion import ingest_pdf, ingest_text
     import shutil
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
     try:
-        paper, msg = ingest_pdf(tmp_path)
+        if ext == "pdf":
+            paper, msg = ingest_pdf(tmp_path)
+        else:
+            with open(tmp_path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            title = file.filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
+            paper, msg = ingest_text(text=text, title=title)
         if paper:
             return {"status": "ok", "paper_id": paper.id, "title": paper.title, "message": msg}
         return {"status": "error", "message": msg}
@@ -368,12 +377,21 @@ async def serve_project_file(project_id: str, filename: str):
 
 @app.get("/api/workspace/{project_id}")
 async def list_workspace(project_id: str):
-    """List files in project working directory (max depth 3)."""
     from research_agent.config import get_data_dir
+    from research_agent.store import get_project as db_get_project
     import os as _os
-    proj_dir = get_data_dir() / "projects" / project_id
-    if not proj_dir.exists():
-        return {"project_id": project_id, "dir": str(proj_dir), "files": []}
+
+    # Use custom workspace_dir if set
+    proj = db_get_project(project_id)
+    if proj and proj.workspace_dir and _os.path.isdir(proj.workspace_dir):
+        proj_dir = proj.workspace_dir
+    else:
+        proj_dir = str(get_data_dir() / "projects" / project_id)
+
+    if not _os.path.exists(proj_dir):
+        return {"project_id": project_id, "dir": proj_dir, "files": []}
+
+    files = []
 
     files = []
     for root, dirs, filenames in _os.walk(proj_dir):

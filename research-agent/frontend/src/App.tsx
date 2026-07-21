@@ -231,7 +231,9 @@ export default function App() {
                 else if (data.tool === 'search_papers') markPlanDone('搜索');
                 else if (data.tool === 'read_paper') markPlanDone('阅读');
               } else if (st === 'empty' || st === 'failed') {
-                aiText += `> ❌ ${st}\n`;
+                aiText += `> ❌ ${data.tool}: ${st}\n`;
+              } else if (st === 'error') {
+                aiText += `> ❌ ${data.tool}: ${data.error || 'error'}\n`;
               } else if (st === 'found') {
                 aiText += `> 📄 找到 ${data.count || 0} 篇\n`;
               } else if (st === 'escalate') {
