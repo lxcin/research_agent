@@ -62,9 +62,10 @@ class Pitfall:
 @dataclass
 class AccumulatedWisdom:
     sops: list[str] = field(default_factory=list)
-    pitfalls: list[dict] = field(default_factory=list)  # [{phenomenon, root_cause, solution, improvement}]
+    pitfalls: list[dict] = field(default_factory=list)
     frameworks: list[str] = field(default_factory=list)
     agent_improvements: list[str] = field(default_factory=list)
+    notes: str = ""
 
 
 @dataclass
@@ -79,6 +80,7 @@ class Project:
     pending_task: PendingTask | None = None
     created_at: str = ""
     updated_at: str = ""
+    workspace_dir: str = ""
 @dataclass
 class AgentState:
     """LangGraph state schema. Memory lives in LangGraph checkpoint per thread_id (project_id)."""

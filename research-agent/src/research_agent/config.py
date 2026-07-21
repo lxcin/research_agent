@@ -74,5 +74,27 @@ def get_llm_key() -> str | None:
     return os.environ.get("RESEARCH_AGENT_LLM_KEY")
 
 
-def get_max_context_tokens() -> int:
-    return int(os.environ.get("RESEARCH_AGENT_MAX_CONTEXT_TOKENS", "4000"))
+def get_max_context_tokens(model_name: str = "") -> int:
+    env = os.environ.get("RESEARCH_AGENT_MAX_CONTEXT_TOKENS")
+    if env:
+        return int(env)
+    name = model_name.lower()
+    if "deepseek" in name: return 64000
+    if "gpt-4o" in name: return 128000
+    if "gpt-4" in name: return 128000
+    if "claude" in name: return 200000
+    if "gemini" in name: return 1000000
+    if "llama" in name: return 128000
+    if "qwen" in name: return 128000
+    return 128000
+
+
+def get_temperature(default: float = 0.7) -> float:
+    return float(os.environ.get("RESEARCH_AGENT_TEMPERATURE", str(default)))
+
+
+def get_max_output_tokens() -> int | None:
+    env = os.environ.get("RESEARCH_AGENT_MAX_OUTPUT_TOKENS")
+    if env:
+        return int(env)
+    return None  # None = no limit, model decides

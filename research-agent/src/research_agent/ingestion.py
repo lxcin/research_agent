@@ -17,7 +17,7 @@ from research_agent.vector_store import add_chunks, get_collection, search
 # ---- Constants ----
 
 REJECT_DOMAINS = ["zhihu.com", "medium.com", "blogspot.com", "mp.weixin.qq.com", "weixin.qq.com"]
-MIN_ACCEPT_SCORE = 4
+MIN_ACCEPT_SCORE = 3
 
 TOP_CONFERENCES = [
     "nature", "science", "cell", "pnas",
@@ -51,7 +51,9 @@ def _strip_references(text: str) -> str:
 
 def _chunk_text_with_sections(text: str, min_tokens: int = 200,
                                max_tokens: int = 800,
-                               overlap_sentences: int = 3) -> list[dict]:
+                               similarity_threshold: float = 0.3) -> list[dict]:
+    """Semantic chunking: splits at section headers and topic boundaries.
+    Uses TF-IDF similarity between adjacent paragraphs to detect topic shifts."""
     text = _strip_references(_clean_text(text))
     sections = re.split(r'(?=^#{1,4}\s)', text, flags=re.MULTILINE)
     chunks = []
@@ -60,66 +62,125 @@ def _chunk_text_with_sections(text: str, min_tokens: int = 200,
     for section in sections:
         header = section.split('\n')[0][:80].strip('#').strip() if section.startswith('#') else ''
         paragraphs = [p.strip() for p in section.split('\n\n') if p.strip()]
-        current = []
-        prev_chunk = None
 
-        for para in paragraphs:
+        if not paragraphs:
+            continue
+
+        # Build TF-IDF for this section to compute paragraph similarity
+        para_tfidf = _build_tfidf(paragraphs)
+
+        current = [paragraphs[0]]
+        prev_vec = para_tfidf[0] if para_tfidf else None
+
+        for i in range(1, len(paragraphs)):
+            para = paragraphs[i]
             words = para.split()
             wc = len(words)
 
-            # Isolate special content
-            if _is_table(para):
-                chunks.append({
-                    "text": para, "chunk_index": idx,
-                    "section": header, "content_type": "table",
-                })
-                idx += 1; continue
+            # Special content always standalone
+            if _is_table(para) or _is_code_or_formula(para):
+                _flush_chunk(current, chunks, idx, header)
+                idx += 1
+                chunks.append({"text": para, "chunk_index": idx,
+                               "section": header, "content_type": "table" if _is_table(para) else "formula"})
+                idx += 1
+                current = []
+                prev_vec = None
+                continue
 
-            if _is_code_or_formula(para):
-                chunks.append({
-                    "text": para, "chunk_index": idx,
-                    "section": header, "content_type": "formula",
-                })
-                idx += 1; continue
-
-            if wc < 20:
+            if wc < 15:
                 current.append(para)
                 continue
 
-            # Build current chunk
             current_wc = sum(len(p.split()) for p in current)
+            cur_vec = para_tfidf[i] if i < len(para_tfidf) else None
+
+            # Check semantic boundary
+            is_boundary = False
+            if prev_vec and cur_vec:
+                similarity = _cosine_similarity(prev_vec, cur_vec)
+                if similarity < similarity_threshold:
+                    is_boundary = True
+
+            # Force split if exceeds max_tokens
             if current_wc + wc > max_tokens and current:
-                chunk_text = ' '.join(current)
-                if prev_chunk:
-                    overlap = _last_n_sentences(prev_chunk["text"], overlap_sentences)
-                    chunk_text = overlap + '\n' + chunk_text
-                chunks.append({
-                    "text": chunk_text, "chunk_index": idx,
-                    "section": header, "content_type": "paragraph",
-                })
+                is_boundary = True
+
+            if is_boundary:
+                _flush_chunk(current, chunks, idx, header)
                 idx += 1
-                prev_chunk = chunks[-1] if chunks else None
                 current = [para]
             else:
                 current.append(para)
 
+            prev_vec = cur_vec
+
         if current:
-            chunk_text = ' '.join(current)
-            current_wc = len(chunk_text.split())
-            if current_wc < min_tokens // 4 and chunks:
-                chunks[-1]["text"] += '\n' + chunk_text
+            current_wc = sum(len(p.split()) for p in current)
+            if current_wc < min_tokens // 3 and chunks:
+                chunks[-1]["text"] += '\n' + ' '.join(current)
             else:
-                if prev_chunk and idx > 0:
-                    overlap = _last_n_sentences(prev_chunk["text"], overlap_sentences)
-                    chunk_text = overlap + '\n' + chunk_text
-                chunks.append({
-                    "text": chunk_text, "chunk_index": idx,
-                    "section": header, "content_type": "paragraph",
-                })
+                _flush_chunk(current, chunks, idx, header)
                 idx += 1
-                prev_chunk = chunks[-1] if chunks else None
 
     return [c for c in chunks if c["text"].strip()]
+
+
+def _flush_chunk(paragraphs: list[str], chunks: list[dict], idx: int, header: str):
+    """Finalize a chunk from accumulated paragraphs."""
+    if not paragraphs:
+        return
+    text = ' '.join(paragraphs)
+    # Remove section header if it's the first paragraph
+    if header and paragraphs[0].startswith('#'):
+        text = text.split('\n', 1)[-1].strip() if '\n' in paragraphs[0] else text
+    if not text.strip():
+        return
+    chunks.append({
+        "text": header + ': ' + text if header and not text.startswith(header) else text,
+        "chunk_index": idx,
+        "section": header,
+        "content_type": "paragraph",
+    })
+
+
+def _build_tfidf(paragraphs: list[str]) -> list[dict[str, float]]:
+    """Build lightweight TF-IDF vectors for paragraph similarity."""
+    from collections import Counter
+    import math
+    n = len(paragraphs)
+    if n < 2:
+        return []
+
+    # Tokenize and count
+    docs = [re.findall(r'[a-zA-Z]+|[0-9]+', p.lower()) for p in paragraphs]
+    doc_freq = Counter()
+    for tokens in docs:
+        doc_freq.update(set(tokens))
+
+    vectors = []
+    for tokens in docs:
+        tf = Counter(tokens)
+        vec = {}
+        for term, count in tf.items():
+            df = doc_freq.get(term, 1)
+            vec[term] = (count / max(len(tokens), 1)) * math.log((n + 1) / (df + 1))
+        # Normalize
+        norm = math.sqrt(sum(v * v for v in vec.values()))
+        if norm > 0:
+            vec = {k: v / norm for k, v in vec.items()}
+        vectors.append(vec)
+    return vectors
+
+
+def _cosine_similarity(a: dict[str, float], b: dict[str, float]) -> float:
+    """Cosine similarity between two sparse vectors."""
+    if not a or not b:
+        return 0.0
+    dot = sum(a.get(k, 0) * b.get(k, 0) for k in set(a) | set(b))
+    if dot == 0:
+        return 0.0
+    return dot  # Vectors are already normalized
 
 
 def _is_table(text: str) -> bool:
@@ -145,6 +206,8 @@ def _score_source(paper: Paper) -> int:
         if conf in title_lower:
             score += 4; break
     if paper.doi:
+        if "arxiv" in paper.doi.lower():
+            score += 1  # arXiv papers get a bonus
         if paper.citation_count > 100:
             score += 3
         elif paper.citation_count > 10:
@@ -211,8 +274,10 @@ def _detect_and_merge_sources(paper_id: str, chunks: list[dict]):
             if paper_id in sid:
                 continue
             try:
+                import os
+                model = os.environ.get("RESEARCH_AGENT_LLM_MODEL", "deepseek/deepseek-chat")
                 resp = litellm.completion(
-                    model="claude-3-haiku-20240307",
+                    model=model,
                     messages=[{"role": "user", "content": f"Compare statements:\nA: {similar['documents'][0][i][:400]}\nB: {chunk['text'][:300]}\nOutput JSON: {{\"relation\": \"agree|contradict|unrelated\", \"explanation\": \"why\"}}"}],
                     max_tokens=150, temperature=0,
                 )
@@ -270,6 +335,10 @@ def _ingest_text(text: str, meta: Paper) -> tuple[Paper | None, str]:
 
     chunks = _chunk_text_with_sections(text)
     add_chunks(paper_id, chunks)
+
+    # Store paper summary in vector store for title/abstract search
+    from research_agent.vector_store import add_paper_summary
+    add_paper_summary(paper_id, meta.title, meta.abstract or "", meta.authors or [], meta.year or 0, meta.doi or "")
 
     _detect_and_merge_sources(paper_id, chunks)
     return meta, "摄入成功"

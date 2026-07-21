@@ -44,10 +44,13 @@ def get_collection(name: str = "research_chunks") -> chromadb.Collection:
     if name not in _COLLECTIONS:
         chroma_path = str(get_data_dir() / "chroma_db")
         client = chromadb.PersistentClient(path=chroma_path)
-        _COLLECTIONS[name] = client.get_or_create_collection(
-            name=name,
-            embedding_function=get_embedding_function(),
-        )
+        try:
+            _COLLECTIONS[name] = client.get_collection(name=name)
+        except Exception:
+            _COLLECTIONS[name] = client.create_collection(
+                name=name,
+                embedding_function=get_embedding_function(),
+            )
     return _COLLECTIONS[name]
 
 
@@ -70,3 +73,18 @@ def delete_paper(paper_id: str):
     results = coll.get(where={"paper_id": paper_id})
     if results["ids"]:
         coll.delete(ids=results["ids"])
+
+
+def add_paper_summary(paper_id: str, title: str, abstract: str, authors: list[str], year: int, doi: str = ""):
+    """Store paper-level summary in ChromaDB for title/abstract search."""
+    coll = get_collection()
+    summary_text = f"Title: {title}\nAuthors: {', '.join(authors[:5])}\nYear: {year}\nAbstract: {abstract}"
+    meta = {
+        "paper_id": paper_id,
+        "chunk_index": -1,  # -1 = paper summary
+        "title": title,
+        "authors": ", ".join(authors[:5]),
+        "year": year,
+        "doi": doi,
+    }
+    coll.upsert(ids=[f"{paper_id}_summary"], documents=[summary_text], metadatas=[meta])

@@ -1,4 +1,4 @@
-"""Hybrid retrieval: vector search + BM25 keyword search + RRF fusion."""
+"""Hybrid retrieval: vector search + BM25 + RRF fusion (k=60)."""
 from functools import lru_cache
 
 import jieba
@@ -90,8 +90,26 @@ def _bm25_search(query: str, n_results: int) -> list[dict]:
     ]
 
 
-def hybrid_search(query: str, n_results: int = 5) -> list[dict]:
-    vector_results = _vector_search(query, n_results * 2)
-    bm25_results = _bm25_search(query, n_results * 2)
+def hybrid_search(query: str, n_results: int = 5, project_id: str | None = None) -> list[dict]:
+    vector_results = _vector_search(query, n_results * 3)
+    bm25_results = _bm25_search(query, n_results * 3)
     fused = _reciprocal_rank_fusion(vector_results, bm25_results)
-    return fused[:n_results]
+    results = fused[:n_results]
+
+    # Filter by project if specified
+    if project_id:
+        from research_agent.store import get_project_papers
+        project_paper_ids = set(get_project_papers(project_id))
+        if project_paper_ids:
+            results = [r for r in results if r.get("paper_id", "") in project_paper_ids]
+            # If too few after filtering, fill with unfiltered
+            if len(results) < n_results:
+                unfiltered = [r for r in fused if r not in results]
+                results += unfiltered[: n_results - len(results)]
+
+    return results[:n_results]
+
+
+def _cross_encoder_rerank(query: str, docs: list[dict], top_k: int) -> list[dict]:
+    """Placeholder for future cross-encoder reranker."""
+    return docs[:top_k]

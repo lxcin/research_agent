@@ -1,29 +1,29 @@
 version: "3.8"
 
 services:
-  agent:
-    build: .
-    image: research-agent:dev
-    container_name: research-agent
-    stdin_open: true
-    tty: true
-    volumes:
-      - ./src:/app/src:ro
-      - research_data:/data
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8050:8050"
     environment:
-      - RESEARCH_AGENT_LLM_KEY=${RESEARCH_AGENT_LLM_KEY:-}
-    command: chat
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - research_data:/root/research-agent-data
+    restart: unless-stopped
 
-  test:
-    build: .
-    image: research-agent:dev
-    container_name: research-agent-test
-    volumes:
-      - ./src:/app/src:ro
-      - ./tests:/app/tests:ro
-    environment:
-      - RESEARCH_AGENT_DATA_DIR=/tmp/test_data
-    command: pytest tests/ -v --tb=short
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
 
 volumes:
   research_data:

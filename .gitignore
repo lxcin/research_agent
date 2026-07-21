@@ -2,3 +2,6 @@
 .opencode/
 opencode.json
 skills/
+review_*.md
+server.log
+data_integration_test/

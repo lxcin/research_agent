@@ -1,9 +1,22 @@
 """Knowledge graph: global graph (auto) + per-paper graph (on-demand)."""
 import json
+import re
 import networkx as nx
 from dataclasses import dataclass, field
 from research_agent.llm import LLMProvider
 from research_agent.store import _get_db, init_db
+
+
+def _parse_json_response(raw: str) -> list | dict | None:
+    """Strip markdown code fences and parse JSON."""
+    text = raw.strip()
+    text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+    text = re.sub(r'\n?```\s*$', '', text)
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
 
 
 @dataclass
@@ -112,6 +125,14 @@ def init_kg_tables():
             target_paper_id TEXT DEFAULT ''
         )
     """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS kg_papers (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            year INTEGER NOT NULL DEFAULT 0,
+            arxiv_id TEXT DEFAULT ''
+        )
+    """)
     db.commit()
 
 
@@ -143,16 +164,37 @@ def save_relation(rel: Relation) -> str:
     return rel.id
 
 
+def save_paper_node(paper_id: str, title: str, year: int = 0):
+    init_kg_tables()
+    db = _get_db()
+    db.execute(
+        "INSERT OR REPLACE INTO kg_papers (id, title, year) VALUES (?, ?, ?)",
+        (f"paper_{paper_id}", title, year)
+    )
+    db.commit()
+
+
 def load_graph() -> KnowledgeGraph:
     init_kg_tables()
     db = _get_db()
     kg = KnowledgeGraph()
 
+    # Load paper nodes
+    rows = db.execute("SELECT id, title, year, arxiv_id FROM kg_papers").fetchall()
+    for row in rows:
+        kg.graph.add_node(row[0], type="paper", title=row[1], year=row[2], arxiv_id=row[3])
+
+    # Load claims
     rows = db.execute("SELECT id, paper_id, text, claim_type, confidence, embedding_id FROM claims").fetchall()
     for row in rows:
         claim = Claim(id=row[0], paper_id=row[1], text=row[2], claim_type=row[3], confidence=row[4], embedding_id=row[5])
         kg.add_claim(claim)
+        # Create edge from paper to claim
+        paper_node_id = f"paper_{claim.paper_id}"
+        if paper_node_id in kg.graph:
+            kg.graph.add_edge(paper_node_id, claim.id, relation_type="has_claim")
 
+    # Load relations
     rows = db.execute("SELECT id, source_claim_id, target_claim_id, relation_type, source_paper_id, target_paper_id FROM kg_relations").fetchall()
     for row in rows:
         rel = Relation(id=row[0], source_claim_id=row[1], target_claim_id=row[2], relation_type=row[3], source_paper_id=row[4], target_paper_id=row[5])
@@ -162,21 +204,25 @@ def load_graph() -> KnowledgeGraph:
 
 
 def extract_claims(text: str, paper_id: str, llm: LLMProvider) -> list[Claim]:
-    prompt = f"""Extract key claims from the following paper text. For each claim, output:
-- text: the claim statement
-- type: one of [claim, evidence, method, result]
-- confidence: 0.0-1.0 based on how clearly the text supports this claim
+    prompt = f"""Extract all key findings and contributions from this paper (up to 6).
+Each finding should be one concise sentence capturing a distinct point.
+- text: one sentence
+- type: one of [finding, method, result, contribution]
+- confidence: 0.0-1.0
 
-Output as JSON array:
-[{{"text": "...", "type": "claim", "confidence": 0.9}}]
+Output ONLY a JSON array (no markdown fences):
+[{{"text": "...", "type": "finding", "confidence": 0.9}}]
 
 Paper text:
 {text[:4000]}"""
 
     try:
         raw = llm.complete([{"role": "user", "content": prompt}], max_tokens=1000)
-        data = json.loads(raw.strip())
+        data = _parse_json_response(raw)
     except Exception:
+        return []
+
+    if not data or not isinstance(data, list):
         return []
 
     claims = []
@@ -204,6 +250,24 @@ def _verify_claim_in_text(claim: str, text: str) -> bool:
     return overlap > 0.3
 
 
+def deduplicate_claims(new_claims: list[Claim], existing_claims: list[Claim],
+                       threshold: float = 0.75) -> list[Claim]:
+    """Remove new claims that are too similar to existing claims."""
+    from difflib import SequenceMatcher
+    unique = []
+    for nc in new_claims:
+        duplicate = False
+        lower_nc = nc.text.lower()
+        for ec in existing_claims:
+            ratio = SequenceMatcher(None, lower_nc, ec.text.lower()).ratio()
+            if ratio > threshold:
+                duplicate = True
+                break
+        if not duplicate:
+            unique.append(nc)
+    return unique
+
+
 def detect_relations(claims: list[Claim], existing_claims: list[Claim], llm: LLMProvider) -> list[Relation]:
     if not existing_claims:
         return []
@@ -229,8 +293,11 @@ Only output pairs that have a clear relationship. Skip unrelated pairs."""
 
     try:
         raw = llm.complete([{"role": "user", "content": prompt}], max_tokens=500)
-        data = json.loads(raw.strip())
+        data = _parse_json_response(raw)
     except Exception:
+        return []
+
+    if not data or not isinstance(data, list):
         return []
 
     relations = []
@@ -247,12 +314,35 @@ Only output pairs that have a clear relationship. Skip unrelated pairs."""
 
 
 def build_global_graph_on_ingest(paper_id: str, text: str, llm: LLMProvider) -> KnowledgeGraph:
+    # Extract title from text (first line "Title: xxx")
+    title = "Unknown Paper"
+    year = 0
+    for line in text.split("\n"):
+        if line.startswith("Title:"):
+            title = line[6:].strip()
+        if line.startswith("Year:"):
+            try:
+                year = int(line[5:].strip())
+            except ValueError:
+                pass
+
+    save_paper_node(paper_id, title, year)
+
     new_claims = extract_claims(text, paper_id, llm)
+
+    # Deduplicate against existing claims
+    kg = load_graph()
+    existing_claims = [kg.graph.nodes[n]["claim"] for n in kg.graph.nodes
+                       if kg.graph.nodes[n].get("claim")]
+    new_claims = deduplicate_claims(new_claims, existing_claims)
+
     for claim in new_claims:
         save_claim(claim)
 
+    # Reload since we added new claims
     kg = load_graph()
-    existing_claims = [kg.graph.nodes[n]["claim"] for n in kg.graph.nodes]
+    existing_claims = [kg.graph.nodes[n]["claim"] for n in kg.graph.nodes
+                       if kg.graph.nodes[n].get("claim")]
 
     relations = detect_relations(new_claims, existing_claims, llm)
     for rel in relations:
@@ -284,8 +374,10 @@ Paper text:
 
     try:
         raw = llm.complete([{"role": "user", "content": prompt}], max_tokens=2000)
-        tree = json.loads(raw.strip())
+        tree = _parse_json_response(raw)
     except Exception:
+        tree = {"thesis": "Unable to parse", "children": []}
+    if not tree or not isinstance(tree, dict):
         tree = {"thesis": "Unable to parse", "children": []}
 
     return {"paper_id": paper_id, "tree": tree}

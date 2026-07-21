@@ -1,28 +1,42 @@
 """SQLite storage for Papers and Projects."""
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 from research_agent.config import get_data_dir
 from research_agent.models import Paper, Project, PendingTask, PlanStep, AccumulatedWisdom, ProjectStatus
 
 _DB = None
+_DB_LOCK = threading.Lock()
 
 
 def _get_db() -> sqlite3.Connection:
     global _DB
     if _DB is None:
         db_path = get_data_dir() / "research_agent.db"
-        _DB = sqlite3.connect(str(db_path))
+        _DB = sqlite3.connect(str(db_path), check_same_thread=False)
         _DB.row_factory = sqlite3.Row
         _DB.execute("PRAGMA journal_mode=WAL")
     return _DB
 
 
+def _execute(sql: str, params=()):
+    with _DB_LOCK:
+        db = _get_db()
+        return db.execute(sql, params)
+
+
+def _executescript(sql: str):
+    with _DB_LOCK:
+        db = _get_db()
+        return db.executescript(sql)
+
+
 def init_db():
     db = _get_db()
     db.executescript("""
-        CREATE TABLE IF NOT EXISTS papers (
+            CREATE TABLE IF NOT EXISTS papers (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL DEFAULT '',
             doi TEXT NOT NULL DEFAULT '',
@@ -54,6 +68,37 @@ def init_db():
         );
     """)
     db.commit()
+
+    # Migration: add workspace_dir column if missing
+    try:
+        db.execute("ALTER TABLE projects ADD COLUMN workspace_dir TEXT DEFAULT ''")
+        db.commit()
+    except Exception:
+        pass
+
+    # Project-paper junction table
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS project_papers (
+            project_id TEXT NOT NULL,
+            paper_id TEXT NOT NULL,
+            PRIMARY KEY (project_id, paper_id)
+        )
+    """)
+    db.commit()
+
+
+def link_paper_to_project(paper_id: str, project_id: str):
+    db = _get_db()
+    db.execute("INSERT OR IGNORE INTO project_papers (project_id, paper_id) VALUES (?, ?)",
+               (project_id, paper_id))
+    db.commit()
+
+
+def get_project_papers(project_id: str) -> list[str]:
+    db = _get_db()
+    rows = db.execute("SELECT paper_id FROM project_papers WHERE project_id = ?",
+                      (project_id,)).fetchall()
+    return [r[0] for r in rows]
 
 
 def init_conflict_table():
@@ -130,6 +175,7 @@ def _project_from_row(row) -> Project:
         plan=[PlanStep(**s) for s in plan_raw],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        workspace_dir=row["workspace_dir"] if "workspace_dir" in row.keys() else "",
     )
 
 
@@ -140,14 +186,15 @@ def insert_project(project: Project) -> str:
     project_id = project.id or str(uuid.uuid4())
     now = datetime.now().isoformat()
     db.execute(
-        "INSERT OR REPLACE INTO projects (id, topic, status, pending_task, history_summary, intro_summary, accumulated_wisdom, plan, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO projects (id, topic, status, pending_task, history_summary, intro_summary, accumulated_wisdom, plan, workspace_dir, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (project_id, project.topic, project.status.value if isinstance(project.status, ProjectStatus) else project.status,
          json.dumps(project.pending_task.__dict__) if project.pending_task else None,
          project.history_summary,
          project.intro_summary,
          json.dumps(project.accumulated_wisdom.__dict__) if project.accumulated_wisdom else "{}",
          json.dumps([s.__dict__ for s in project.plan]),
+         getattr(project, 'workspace_dir', '') or '',
          project.created_at or now, now),
     )
     db.commit()
@@ -171,6 +218,7 @@ def update_project(project: Project):
 
 
 def delete_project(project_id: str):
-    db = _get_db()
-    db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-    db.commit()
+    with _DB_LOCK:
+        db = _get_db()
+        db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        db.commit()

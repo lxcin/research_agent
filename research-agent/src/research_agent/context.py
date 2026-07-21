@@ -3,17 +3,14 @@ import tiktoken
 from research_agent.config import get_max_context_tokens
 from research_agent.models import AgentState, ConversationTurn
 
-SYSTEM_PROMPT = """你是一个科研助手。你可以：
-- 检索论文知识库回答用户问题
-- 管理项目进度
-- 总结对话
+BASE_SYSTEM_PROMPT = "你是 PaperPilot，一个研究助手。思考后行动，结论必须基于数据或运行结果。随时用 update_notes 记录发现。诚实面对能力边界，不编造结果。"
 
-当用户提到论文相关内容时，你应该输出 JSON 决定下一步动作：
-{"action": "retrieve", "query": "搜索关键词", "target": "papers"}
-{"action": "generate", "reasoning": "为什么不需要检索"}
-{"action": "stop", "reasoning": "为什么结束"}
 
-如果没有需要检索的内容，直接回答用户问题即可。"""
+SURVEY_WORKFLOW = """## 综述写作流程
+1. retrieve/search_papers 查找候选论文
+2. 读之前先检查标题和摘要是否相关，只 read_paper 相关的
+3. read_paper 返回 title, authors, year, full_text
+4. 读完相关论文后写综述，用 [N] 引用，末尾列参考文献： [N] Title. Authors. Year."""
 
 
 def count_tokens(text: str) -> int:
@@ -24,28 +21,60 @@ def count_tokens(text: str) -> int:
         return len(text) // 4
 
 
-def build_context(state: AgentState) -> list[dict]:
-    max_tokens = get_max_context_tokens()
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+def build_context(state: AgentState, registry=None, model_name: str = "") -> list[dict]:
+    max_tokens = get_max_context_tokens(model_name)
+    messages = []
 
+    # 1. Identity
+    messages.append({"role": "system", "content": BASE_SYSTEM_PROMPT})
+
+    # 2. Tool capabilities
+    if registry:
+        messages.append({"role": "system", "content": registry.generate_capabilities()})
+
+    # 3. Project context + notes
     if state.active_project:
         proj = f"当前项目: {state.active_project.topic}"
+        notes = getattr(state.active_project.accumulated_wisdom, 'notes', '')
+        if notes:
+            entries = notes.strip().split("\n")
+            recent = entries[-10:]
+            proj += f"\n研究笔记({len(entries)}条):\n" + "\n".join(recent)
         if state.active_project.history_summary:
             proj += f"\n项目摘要: {state.active_project.history_summary}"
         messages.append({"role": "system", "content": proj})
 
-    if hasattr(state, 'compressed_summaries') and state.compressed_summaries:
-        summaries = "\n".join(state.compressed_summaries)
-        messages.append({"role": "system", "content": f"早期对话摘要:\n{summaries}"})
+        # Cross-project reference
+        from research_agent.store import get_all_projects as gap
+        all_projects = gap()
+        for p in all_projects:
+            if p.id == state.active_project.id: continue
+            if p.topic.lower() in state.user_input.lower():
+                p_notes = getattr(p.accumulated_wisdom, 'notes', '')
+                if p_notes:
+                    entries = p_notes.strip().split("\n")
+                    messages.append({"role": "system", "content": f"项目「{p.topic}」笔记:\n" + "\n".join(entries[-5:])})
+                break
 
+    # 4. Conversation history
     if hasattr(state, 'conversation_turns') and state.conversation_turns:
-        turns_text = format_turns(state.conversation_turns[-10:])
-        messages.append({"role": "system", "content": f"最近对话:\n{turns_text}"})
+        summaries = [t.summary for t in state.conversation_turns if t.compressed and t.summary]
+        recent = [t for t in state.conversation_turns if not t.compressed][-10:]
+        if summaries:
+            messages.append({"role": "system", "content": "历史摘要:\n" + "\n".join(summaries)})
+        if recent:
+            messages.append({"role": "system", "content": "最近对话:\n" + format_turns(recent)})
 
+    # 5. Retrieved context
     if state.retrieved_context:
-        ctx_text = format_retrieved(state.retrieved_context)
-        messages.append({"role": "system", "content": f"检索结果:\n{ctx_text}"})
+        messages.append({"role": "system", "content": "检索结果:\n" + format_retrieved(state.retrieved_context)})
 
+    # 6. Skill / Workflow (injected as system message before user input)
+    user_lower = state.user_input.lower()
+    if any(kw in user_lower for kw in ["survey", "综述", "review", "文献调研"]):
+        messages.append({"role": "system", "content": SURVEY_WORKFLOW})
+
+    # 7. User input LAST — freshest in context
     messages.append({"role": "user", "content": state.user_input})
 
     return trim_messages(messages, max_tokens)
@@ -73,7 +102,6 @@ def trim_messages(messages: list[dict], max_tokens: int) -> list[dict]:
     total = sum(count_tokens(m.get("content", "")) for m in messages)
     if total <= max_tokens:
         return messages
-
     result = []
     for m in messages:
         result.append(m)
