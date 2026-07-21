@@ -905,3 +905,39 @@ V2 在 V1 harness 基础上做了以下主要变更：
 - [x] 多项目工作区隔离
 - [x] 桌面应用打包
 - [x] 综述生成: 17 read, 17 cited, 16K chars
+
+## 领域与机制设计 (Harness Mechanisms — A.3/A.4)
+
+### 该领域的四类机制
+
+| 机制 | Coding 领域 | 本项目实现 |
+|------|------|------|
+| 动作/工具 | 读写文件、shell、代码搜索 | 11 tools (ToolRegistry) |
+| 反馈信号 | test/lint/typecheck result | validate_result() 确定性校验器 |
+| 危险动作 | rm -rf、sudo、curl\|bash | guardrail() 拦截 10+ 危险模式 |
+| 记忆 | 项目约定、历史决策 | context injection + accumulated_wisdom |
+
+### 重点维度: 治理与反馈 (Governance & Feedback)
+
+选择治理+反馈作为深入实现的维度:
+
+**治理护栏 (guardrail.py)**
+- 确定性代码拦截器，不依赖 LLM
+- 拦截 10+ 危险模式: rm -rf、sudo、fork bomb、curl\|bash、mkfs
+- 可 mock 测试: guardrail(Action("rm -rf /")) → 阻断，每次都成立
+
+**反馈闭环 (validate.py)**
+- 确定性校验器: alidate_result(tool_name, data) → ValidationResult
+- 失败时产生结构化反馈: {passed: false, errors: [...], data: {retry_hint: "..."}}
+- 反馈可回灌到 agent loop，驱动自我修正
+- 四种工具覆盖: shell_exec、file_write、file_edit、retrieve
+
+**mock LLM 单元测试**
+- 19 个确定性测试 (test_harness_mechanisms.py)
+- 覆盖: 护栏拦截、反馈校验、JSON 解析、mock LLM 回放
+- 无需真实 LLM，可离线运行
+
+### 移除 LLM 后剩什么
+
+运行 pytest tests/test_harness_mechanisms.py -v → 19 passed。
+所有测试基于 MockLLMProvider 或直接函数调用，无需网络/API。
