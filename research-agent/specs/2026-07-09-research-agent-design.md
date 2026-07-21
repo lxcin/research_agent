@@ -853,3 +853,55 @@ Agent 系统指令的增量规则：
 - 云端部署
 - 跨 Agent 项目协作
 - 移动端
+---
+
+## V2 迭代 (2026-07-10 ~ 2026-07-21)
+
+### V2 变更概述
+
+V2 在 V1 harness 基础上做了以下主要变更：
+
+**架构变更**
+- LangGraph → litellm native function calling (tool_choice=""auto"")
+- JSON 解析 action → OpenAI function call schema
+- Skill/MCP 作为独立模块注册 → context injection 模式
+
+**工具系统重构**
+- 4 个硬编码 action → 11 个 ToolRegistry 工具
+- 新增: shell_exec (foreground/background), file_read/write/edit/glob/grep, check_tasks
+- my_tools/ 目录自动导入用户自定义工具
+
+**上下文引擎重构**
+- 固定 4000 token 截断 → 模型自适应 (DeepSeek 64K, GPT-4o 128K)  
+- 两个 build_context/build_chat_context → 统一 build_context + messages 累积
+- 新增 context injection (SURVEY_WORKFLOW) 替代 Python handler skill
+
+**前端重写**
+- 纯文本聊天 → React + TypeScript + react-markdown + Mermaid
+- 新增: 侧边栏项目管理、多对话 ChatTabs、工作区可拖拽侧边栏、论文库 CRUD
+- 桌面应用: pywebview + tkinter 原生文件夹选择器
+
+**检索优化**
+- Semantic Scholar → arXiv API
+- 固定分块 → TF-IDF 语义切块
+- RRF k=10 → k=60
+
+### V2 关键决策
+
+| 决策 | V1 | V2 | 理由 |
+|------|------|------|------|
+| Agent 循环 | LangGraph | litellm function calling | 调试透明，工具稳定性高 |
+| Skill 实现 | Python handler | context injection | LLM 保留流程控制权 |
+| 上下文 | 硬编码 4000 tokens | 模型自适应 | 现代 LLM 支持 64K+ |
+| 前端 | 无 | React + pywebview | 用户体验需求 |
+| 论文搜索 | Semantic Scholar | arXiv API | S2 搜索质量差 |
+
+### V2 验收
+
+- [x] function calling 替代 JSON 解析
+- [x] 11 工具注册表可插拔
+- [x] context injection SURVEY_WORKFLOW
+- [x] 后台任务 + check_tasks
+- [x] 多项目工作区隔离
+- [x] 桌面应用打包
+- [x] 综述生成: 17 read, 17 cited, 16K chars

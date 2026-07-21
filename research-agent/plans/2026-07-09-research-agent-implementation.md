@@ -3536,3 +3536,34 @@ Expected: Shows available commands (chat, status)
 9. `git log --oneline` shows one commit per task across 5 branches
 10. All 5 worktree PRs merged to master
 11. `finishing-a-development-branch` 技能执行完成
+---
+
+## V2 迭代任务 (2026-07)
+
+### 已完成
+
+| # | Task | 验证 |
+|------|------|------|
+| V2-1 | Function Calling Agent Loop | tool_choice=""auto"", 端到端测试通过 |
+| V2-2 | ToolRegistry 可插拔 | 11 tools, load_from_dir() 自动导入 |
+| V2-3 | 内联工具调用 | 工具结果出现在回答文本内 |
+| V2-4 | 侧边栏 + 多对话 | 项目切换 + ChatTabs |
+| V2-5 | 工作区侧边栏 | 可拖拽、文件预览、自动刷新 |
+| V2-6 | 论文双写 | search_papers → workspace/papers/*.md |
+| V2-7 | context injection | SURVEY_WORKFLOW 注入 |
+| V2-8 | read_paper 元数据 | ChromaDB summary metadata |
+| V2-9 | 后台任务 | shell_exec(background=true) + check_tasks |
+| V2-10 | 语义切块 | TF-IDF 段落相似度边界检测 |
+| V2-11 | 上下文清理 | 模型自适应 token, 统一 build_context |
+| V2-12 | 前端重写 | React + react-markdown + Mermaid |
+| V2-13 | 桌面打包 | pywebview + PyInstaller spec |
+| V2-14 | 文档恢复 | SPEC/PLAN/SPEC_PROCESS 补全 |
+| V2-15 | CI 修复 | GitHub Actions test + docker + deploy |
+
+### 待完成
+
+| # | Task |
+|------|------|
+| V2-16 | mock LLM 单元测试（CI 可运行） |
+| V2-17 | 凭据加密存储（钥匙串替代 localStorage） |
+| V2-18 | WebUI 部署 URL |

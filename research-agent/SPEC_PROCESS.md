@@ -206,4 +206,30 @@ AI: 可溯源多源 RAG（Traceable Multi-Source RAG）
 |------|------|--------|------|
 | SPEC | `docs/superpowers/specs/2026-07-09-research-agent-design.md` | — | 通过冷启动验证 |
 | PLAN | `docs/superpowers/plans/2026-07-09-research-agent-implementation.md` | 15 | 7 个缺陷已修复，通过冷启动验证 |
-| 本文档 | `docs/superpowers/SPEC_PROCESS.md` | — | 完成 |
+| 本文档 | `docs/superpowers/SPEC_PROCESS.md` | — | 完成 |---
+
+## V2 迭代过程 (2026-07-10 ~ 2026-07-21)
+
+### V2 主要变更
+
+V2 是在 V1 harness 基础上的增量迭代，保留了 V1 的核心架构（自实现 agent loop、SQLite+ChromaDB 存储、混合检索），重点增强了用户体验和工具能力。
+
+### 关键设计讨论
+
+**Function Calling vs JSON 解析**
+V1 让 LLM 输出 JSON {""action"": ""retrieve""}，但 DeepSeek 有时输出 markdown fence 包裹的 JSON。切换到 litellm native function calling 后稳定性大幅提升，且 LLM 可以同时调用多个工具（如 retrieve + search_papers 并行）。
+
+**Skill 的实现形态**
+最初把文献综述写成 Python handler 注册为 tool，LLM 不愿调用且失去流程控制。改为 context injection——注入 SURVEY_WORKFLOW 到 system prompt，LLM 用自己的工具按流程执行。这是 V2 最重要的设计决策之一。
+
+**上下文上下文为什么截断论文全文**
+发现 build_chat_context 不包含 tool results，造成""读了 13 篇只引用 4 篇""。根因是 trim_messages 截断到 4000 tokens。修复：按模型自适应上限（DeepSeek 64K），generate 阶段直接使用 messages（包含所有工具结果）。
+
+**Prompt 分段的重要性**
+使用 === 以下是工具调用结果 === 分隔线后，DeepSeek 不再输出 <tool_calls> XML。分隔线让 LLM 明确区分""数据""和""任务""。
+
+### 人工干预记录
+
+- 修复 <tool_calls> XML 输出：使用 _generate_msgs 过滤 assistant tool_call 消息
+- 修复论文引用率低：bump context limit 4000→64000 + messages 传递工具结果
+- 修复综述永远不写：DeepSeek function calling 循环中不愿停止调工具，加强 SURVEY_WORKFLOW 指引
