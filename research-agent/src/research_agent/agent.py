@@ -71,9 +71,9 @@ def _generate_msgs(messages: list[dict], state) -> list[dict]:
         content = tm.get("content", "")[:6000]  # Trim each result
         results.append({"role": "system", "content": f"[工具结果 {i+1}]\n{content}"})
     return [
-        {"role": "system", "content": "=== 以下是本轮所有工具调用结果（包括读过的论文全文） ==="},
+        {"role": "system", "content": "=== Tool Results / 工具调用结果 (including full paper text / 含论文全文) ==="},
         *results,
-        {"role": "system", "content": "=== 以上是工具结果。现在基于这些结果回答用户问题，引用用 [N] 标注。 ==="},
+        {"role": "system", "content": "=== End of tool results. Answer the user / 工具结果结束，回答用户问题 ==="},
         {"role": "user", "content": state.user_input},
     ]
 

@@ -3,14 +3,17 @@ import tiktoken
 from research_agent.config import get_max_context_tokens
 from research_agent.models import AgentState, ConversationTurn
 
-BASE_SYSTEM_PROMPT = "你是 PaperPilot，一个研究助手。思考后行动，结论必须基于数据或运行结果。随时用 update_notes 记录发现。诚实面对能力边界，不编造结果。"
+BASE_SYSTEM_PROMPT = """You are PaperPilot, a research assistant. Think before acting. Base all conclusions on data or run results. Use update_notes to record findings. Be honest about limitations.
+
+你是 PaperPilot，一个研究助手。思考后行动。结论基于数据或运行结果。随时用 update_notes 记录发现。诚实面对能力边界，不编造结果。Always match the user's language in your response."""
 
 
-SURVEY_WORKFLOW = """## 综述写作流程
-1. retrieve/search_papers 查找候选论文
-2. 读之前先检查标题和摘要是否相关，只 read_paper 相关的
-3. read_paper 返回 title, authors, year, full_text
-4. 读完相关论文后写综述，用 [N] 引用，末尾列参考文献： [N] Title. Authors. Year."""
+SURVEY_WORKFLOW = """## Survey Writing Protocol / 综述写作流程
+1. retrieve/search_papers to find candidate papers / 查找候选论文
+2. BEFORE reading, check title and abstract relevance / 读前检查标题和摘要是否相关
+3. read_paper on relevant papers. Returns: title, authors, year, full_text.
+4. After reading, write survey citing with [N] format / 读完写综述，用 [N] 引用
+5. Reference list: [N] Title. Authors. Year. / 参考文献格式"""
 
 
 def count_tokens(text: str) -> int:
@@ -34,7 +37,7 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
 
     # 3. Project context + notes
     if state.active_project:
-        proj = f"当前项目: {state.active_project.topic}"
+        proj = f"Project: {state.active_project.topic} / 当前项目: {state.active_project.topic}"
         notes = getattr(state.active_project.accumulated_wisdom, 'notes', '')
         if notes:
             entries = notes.strip().split("\n")
