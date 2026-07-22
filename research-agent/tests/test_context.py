@@ -1,5 +1,6 @@
 from research_agent.context import count_tokens, build_context
 from research_agent.models import AgentState
+from research_agent.store import init_db
 
 
 def test_count_tokens():
@@ -13,6 +14,7 @@ def test_build_context_minimal():
 
 
 def test_build_context_with_project():
+    init_db()
     from research_agent.models import Project, ProjectStatus
     state = AgentState(
         user_input="test",
