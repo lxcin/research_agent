@@ -1,7 +1,6 @@
 ﻿chromadb
 fastapi
 httpx
-httpx-sse
 jieba
 litellm
 networkx
@@ -9,6 +8,7 @@ numpy
 pydantic
 PyMuPDF
 rank-bm25
+sentence-transformers
 tiktoken
 uvicorn
 pytest

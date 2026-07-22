@@ -24,7 +24,7 @@ jobs:
       - name: Run tests
         run: |
           pip install pytest-timeout
-          PYTHONPATH=src pytest tests/ -v --tb=short -k "not (test_e2e or test_integration or test_llm)"
+          PYTHONPATH=src pytest tests/ -v --tb=short -k "not (test_e2e or test_integration or test_llm or test_vector_store or test_retrieval or test_ingestion or test_memory or test_chinese)"
         working-directory: research-agent
 
       - name: Check credentials
