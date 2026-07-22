@@ -43,12 +43,15 @@ def main():
 
     # Wait for server to be ready
     import httpx
-    for _ in range(30):
+    for i in range(60):
         try:
-            httpx.get("http://127.0.0.1:8050/api/health", timeout=1)
+            httpx.get("http://127.0.0.1:8050/api/health", timeout=2)
             break
         except Exception:
-            time.sleep(0.5)
+            time.sleep(1)
+    else:
+        print("ERROR: Server failed to start within 60s")
+        sys.exit(1)
 
     # Open native window with JS API
     import webview
