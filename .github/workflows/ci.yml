@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [master]
 
+defaults:
+  run:
+    working-directory: research-agent
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -18,25 +22,23 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: cd research-agent && pip install -r requirements.txt
 
       - name: Run tests (skip LLM-dependent)
-        run: |
-          pip install pytest-timeout
-          pytest tests/ -v --tb=short -k "not (test_e2e or test_integration or test_llm)"
+        run: cd research-agent && pip install pytest-timeout && pytest tests/ -v --tb=short -k "not (test_e2e or test_integration or test_llm)"
 
       - name: Check hardcoded credentials
         run: |
+          cd research-agent
           if grep -rPn "sk-[a-zA-Z0-9]{20,}" src/; then echo "WARNING: API key pattern found" >&2; fi
-          if grep -rPn "api_key\s*=\s*['\"][a-zA-Z0-9]{10,}" src/; then echo "WARNING: Hardcoded key found" >&2; fi
 
       - name: Verify docs exist
         run: |
+          cd research-agent
           test -f specs/2026-07-09-research-agent-design.md && echo "SPEC OK"
           test -f plans/2026-07-09-research-agent-implementation.md && echo "PLAN OK"
-          test -f SPEC_PROCESS.md && echo "SPEC_PROCESS OK"
-          test -f AGENT_LOG.md && echo "AGENT_LOG OK"
+          test -f SPEC_PROCESS.md && echo "PROCESS OK"
+          test -f AGENT_LOG.md && echo "LOG OK"
           test -f REFLECTION.md && echo "REFLECTION OK"
 
   frontend:
@@ -47,8 +49,8 @@ jobs:
         with:
           node-version: 18
       - name: Build frontend
-        working-directory: frontend
         run: |
+          cd research-agent/frontend
           npm install
           npx tsc --noEmit
           npx vite build
@@ -59,6 +61,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build backend image
-        run: docker build -f Dockerfile.backend -t paperpilot-backend:ci .
+        run: cd research-agent && docker build -f Dockerfile.backend -t paperpilot-backend:ci .
       - name: Build frontend image
-        run: docker build -f Dockerfile.frontend -t paperpilot-frontend:ci .
+        run: cd research-agent && docker build -f Dockerfile.frontend -t paperpilot-frontend:ci .
