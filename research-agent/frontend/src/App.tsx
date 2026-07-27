@@ -10,6 +10,7 @@ import SettingsPanel from './components/SettingsPanel';
 import PaperLibrary from './components/PaperLibrary';
 import ToolsPanel from './components/ToolsPanel';
 import WorkspaceSidebar from './components/WorkspaceSidebar';
+import SkillsPanel from './components/SkillsPanel';
 import ChatTabs from './components/ChatTabs';
 import ErrorBoundary from './components/ErrorBoundary';
 import type { PlanItem } from './components/PlanPanel';
@@ -93,6 +94,7 @@ export default function App() {
   const [papersOpen, setPapersOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
   const [wsRefresh, setWsRefresh] = useState(0);
   const [citeDetail, setCiteDetail] = useState<any>(null);
   const [planItems, setPlanItems] = useState<PlanItem[]>([]);
@@ -485,6 +487,16 @@ const handleSelectProject = useCallback((id: string) => {
         defaultTop={80} defaultLeft={420}
       >
         <ToolsPanel />
+      </FloatingWindow>
+
+      <FloatingWindow
+        isOpen={skillsOpen}
+        onToggle={() => setSkillsOpen(false)}
+        title="Skills"
+        defaultWidth={360} defaultHeight={400}
+        defaultTop={80} defaultLeft={520}
+      >
+        <SkillsPanel />
       </FloatingWindow>
 
       {settingsOpen && (

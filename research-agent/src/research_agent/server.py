@@ -411,6 +411,28 @@ async def list_workspace(project_id: str):
     return {"project_id": project_id, "dir": str(proj_dir), "files": files[:100], "count": len(files)}
 
 
+@app.get("/api/skills")
+async def list_skills():
+    from research_agent.skill_loader import load_skills_from_dir
+    import os
+    skills_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "skills")
+    if not os.path.isdir(skills_dir):
+        skills_dir = os.path.join(os.getcwd(), "skills")
+    loaded = load_skills_from_dir(skills_dir)
+    return [{"name": s.name, "description": s.description, "triggers": s.triggers, "enabled": s.enabled, "file_path": s.file_path} for s in loaded]
+
+
+@app.put("/api/skills/{name}")
+async def save_skill(name: str, body: dict):
+    import os
+    skills_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "skills")
+    file_path = os.path.join(skills_dir, f"{name}.md")
+    content = f"---\nname: {name}\ndescription: {body.get('description', '')}\ntriggers: {body.get('triggers', [])}\nenabled: {body.get('enabled', True)}\n---\n\n{body.get('body', '')}"
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return {"status": "ok"}
+
+
 if __name__ == "__main__":
     import uvicorn
     print(f"PaperPilot API at http://localhost:8050")

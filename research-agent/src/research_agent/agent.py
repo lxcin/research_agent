@@ -228,6 +228,28 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     from research_agent.skill import load_and_register_skills
     register_builtins()
     load_and_register_skills()
+
+    # Auto-load MCP servers from config
+    import os as _os
+    try:
+        from research_agent.tools.mcp_loader import MCPManager
+        mcp_config = _os.path.join(
+            _os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))),
+            "skills", "mcp.yml",
+        )
+        if _os.path.exists(mcp_config):
+            manager = MCPManager(mcp_config)
+            import atexit
+            atexit.register(manager.shutdown)
+            results = manager.start_all()
+            for key, names in results.items():
+                if names:
+                    _emit(on_event, "step", {"step": "mcp_loaded", "text": f"MCP: {len(names)} tools from {key}"})
+                elif key in results:
+                    _emit(on_event, "step", {"step": "mcp_failed", "text": f"MCP: {key} failed"})
+    except Exception:
+        pass
+
     registry = get_registry()
 
     state.user_input = user_input
@@ -275,6 +297,12 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             import os
             os.makedirs(os.path.join(ws_dir, "papers"), exist_ok=True)
             os.makedirs(os.path.join(ws_dir, "experiments"), exist_ok=True)
+            # Initialize git repo in workspace
+            try:
+                from research_agent.tools.git_tool import git_init
+                git_init(ws_dir)
+            except Exception:
+                pass
             _emit(on_event, "step", {"step": "project_created", "text": f"创建项目: {topic}\n工作区: {ws_dir}"})
 
     if state.active_project and state.active_project.status == ProjectStatus.WAITING:
@@ -324,6 +352,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
 
         # ── Process tool calls ──
         tool_calls = response.get("tool_calls", [])
+        round_action_names = [tc["name"] for tc in tool_calls] if tool_calls else []
         if tool_calls:
             messages.append({
                 "role": "assistant", "content": None,
@@ -335,6 +364,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             })
 
             round_retry = 0
+            round_has_errors = False
             for tc in tool_calls:
                 _emit(on_event, "action", {
                     "action": tc["name"], "query": json.dumps(tc["params"], ensure_ascii=False)[:100],
@@ -345,7 +375,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                     total_search_rounds += 1
 
                 if tc["name"] not in registry:
-                    total_retries += 1; round_retry += 1
+                    total_retries += 1; round_retry += 1; round_has_errors = True
                     hint = f"工具'{tc['name']}'不存在。可用: {', '.join(registry.tools.keys())}"
                     if round_retry >= 2:
                         hint += " 请直接回答，不要调用工具。"
@@ -357,7 +387,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                 result = registry.dispatch(tc["name"], tc["params"], llm, state, on_event)
 
                 if not result.success and result.data.get("error"):
-                    total_retries += 1; round_retry += 1
+                    total_retries += 1; round_retry += 1; round_has_errors = True
                     err_detail = result.data.get("error", "")
                     if "stderr" in result.data and result.data["stderr"]:
                         err_detail += f"\nstderr: {result.data['stderr'][:500]}"
@@ -404,6 +434,17 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                        "hint": "本地结果不足，建议使用 search_papers"})
                 messages.append({"role": "system", "content": "本地检索结果较少（<3条），建议使用 search_papers 搜索 arXiv 获取更多论文。"})
                 consecutive_retrieve_few = 0
+            # Auto-checkpoint after successful rounds with file/shell operations
+            try:
+                from research_agent.tools.git_tool import git_checkpoint, should_auto_checkpoint
+                if state.active_project:
+                    from research_agent.tools.builtin.filesystem import _get_project_dir
+                    ws = _get_project_dir(state)
+                    if ws and os.path.isdir(os.path.join(ws, ".git")) and should_auto_checkpoint(round_action_names, round_has_errors):
+                        git_checkpoint(ws, f"round_{round_num}: auto checkpoint")
+                        _emit(on_event, "step", {"step": "checkpoint", "text": f"自动检查点: round_{round_num}"})
+            except Exception:
+                pass
             continue
 
         # ── No tool calls → text response ──

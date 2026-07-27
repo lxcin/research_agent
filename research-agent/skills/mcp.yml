@@ -1,0 +1,8 @@
+# MCP Server Configuration
+# Commands are launched via stdio JSON-RPC
+# Tools auto-registered with "mcp_" prefix
+
+servers:
+  # Example: a Python MCP server
+  # - command: ["python", "my_mcp_server.py"]
+  - command: []

@@ -74,7 +74,15 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
 
     # 6. Skill / Workflow (injected as system message before user input)
     user_lower = state.user_input.lower()
-    if any(kw in user_lower for kw in ["survey", "综述", "review", "文献调研"]):
+    # External skills (YAML .md files) take priority over hardcoded workflow
+    from research_agent.skill_loader import load_skills_from_dir, get_active_skills_context
+    import os
+    skills_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "skills")
+    external_skills = load_skills_from_dir(skills_dir)
+    skill_ctx = get_active_skills_context(external_skills, user_lower)
+    if skill_ctx:
+        messages.append({"role": "system", "content": skill_ctx})
+    elif any(kw in user_lower for kw in ["survey", "综述", "review", "文献调研"]):
         messages.append({"role": "system", "content": SURVEY_WORKFLOW})
 
     # 7. User input LAST — freshest in context
