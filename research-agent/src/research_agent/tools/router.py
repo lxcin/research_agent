@@ -23,7 +23,7 @@ INTENT_ROUTES: dict[str, list[str]] = {
 # Keywords in user input that trigger each intent
 INTENT_KEYWORDS: dict[str, list[str]] = {
     "retrieve": ["检索", "retrieve", "查找", "找", "有什么", "有没有", "哪些", "find paper", "find articles"],
-    "read":     ["读", "read", "看内容", "内容是什么", "讲什么"],
+    "read":     ["读", "read", "看内容", "内容是什么", "讲什么", "讲了什么", "说了什么"],
     "search":   ["搜索 arxiv", "search arxiv", "arxiv", "搜论文", "search for paper"],
     "write":    ["写", "write", "保存", "save", "创建文件", "create file", "记录", "做笔记"],
     "execute":  ["运行", "run", "执行", "exec", "shell", "实验", "experiment", "训练", "train"],
