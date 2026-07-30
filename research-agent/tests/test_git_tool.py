@@ -175,6 +175,16 @@ class TestAutoCheckpoint:
 
 # ── Helpers (these become the implementation signatures) ──
 
+def _ensure_git_config(project_dir: str):
+    """Ensure git user.name and user.email are set for this repo."""
+    for key, val in [("user.name", "PaperPilot"), ("user.email", "paperpilot@test.local")]:
+        r = subprocess.run(["git", "config", key], cwd=project_dir,
+                           capture_output=True, text=True, timeout=5)
+        if not r.stdout.strip():
+            subprocess.run(["git", "config", key, val], cwd=project_dir,
+                           capture_output=True, timeout=5)
+
+
 def _git_init(project_dir: str) -> dict:
     """Initialize git repo in project_dir. Called once per project."""
     if os.path.isdir(os.path.join(project_dir, ".git")):
@@ -186,6 +196,7 @@ def _git_init(project_dir: str) -> dict:
         return {"success": False, "error": "git not found"}
     if r.returncode != 0:
         return {"success": False, "error": r.stderr.strip()}
+    _ensure_git_config(project_dir)
     gi = os.path.join(project_dir, ".gitignore")
     if not os.path.exists(gi):
         with open(gi, "w") as f:
@@ -195,6 +206,7 @@ def _git_init(project_dir: str) -> dict:
 
 def _git_checkpoint(project_dir: str, message: str) -> dict:
     """Save working tree snapshot."""
+    _ensure_git_config(project_dir)
     escaped = message.replace('"', '\\"')
     subprocess.run(["git", "add", "-A"], cwd=project_dir,
                    capture_output=True, timeout=10)

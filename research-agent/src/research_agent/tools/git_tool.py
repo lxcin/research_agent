@@ -31,6 +31,14 @@ def _run_git(args: list[str], cwd: str, timeout: int = 15) -> dict:
         return {"success": False, "stderr": str(e), "returncode": -2}
 
 
+def _ensure_git_config(project_dir: str):
+    """Ensure git user.name and user.email are set for this repo."""
+    for key, val in [("user.name", "PaperPilot"), ("user.email", "paperpilot@agent.local")]:
+        r = _run_git(["config", key], str(project_dir))
+        if not r["stdout"]:
+            _run_git(["config", key, val], str(project_dir))
+
+
 def git_init(project_dir: str | Path) -> dict:
     """Initialize a git repository in the project workdir."""
     d = str(project_dir)
@@ -40,6 +48,8 @@ def git_init(project_dir: str | Path) -> dict:
     result = _run_git(["init"], d)
     if not result["success"]:
         return {"success": False, "error": result["stderr"]}
+
+    _ensure_git_config(d)
 
     gi = os.path.join(d, ".gitignore")
     if not os.path.exists(gi):
@@ -59,6 +69,7 @@ def git_init(project_dir: str | Path) -> dict:
 def git_checkpoint(project_dir: str | Path, message: str) -> dict:
     """Stage all changes and commit as a named checkpoint."""
     d = str(project_dir)
+    _ensure_git_config(d)
     escaped = message.replace('"', '\\"')
 
     _run_git(["add", "-A"], d)
