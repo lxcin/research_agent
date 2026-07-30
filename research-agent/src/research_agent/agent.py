@@ -314,8 +314,14 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     project_id = state.active_project.id if state.active_project else "default"
     state.conversation_turns = get_recent_turns(project_id, limit=20)
 
+    # ── Intent routing: reduce tool list to relevant subset ──
+    from research_agent.tools.router import categorize_intent, route_tools, build_routing_report
+    intent = categorize_intent(user_input)
+    tools_list = route_tools(intent, registry)
+    routing_note = build_routing_report(intent, registry)
+    _emit(on_event, "step", {"step": "route_tools", "text": routing_note})
+
     # ── Agent loop with function calling ──
-    tools_list = registry.list_for_llm()
     consecutive_empty = 0
     total_search_rounds = 0
     total_retries = 0
@@ -323,6 +329,8 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
 
     model_name = getattr(llm, "model", "")
     messages = build_context(state, registry, model_name)
+    # Inject routing info as first system message
+    messages.insert(1, {"role": "system", "content": routing_note})
 
     for round_num in range(1, MAX_ROUNDS + 1):
         state.round_count = round_num
