@@ -10,13 +10,12 @@ INTENT_ROUTES: dict[str, list[str]] = {
     "retrieve":     ["retrieve", "search_papers", "read_paper", "update_notes"],
     "read":         ["read_paper", "file_read", "retrieve", "update_notes"],
     "search":       ["search_papers", "retrieve", "read_paper"],
-    "write":        ["file_write", "file_edit", "file_read", "file_glob", "git_checkpoint", "git_status"],
+    "write":        ["file_write", "file_edit", "file_read", "file_glob"],
     "execute":      ["shell_exec", "check_tasks", "file_read", "file_write"],
-    "git":          ["git_init", "git_checkpoint", "git_log", "git_rollback", "git_status"],
+    "git":          ["shell_exec"],   # LLM uses shell_exec for git commands
     "review":       ["retrieve", "search_papers", "read_paper", "update_notes",
-                     "file_write", "file_edit", "file_read", "git_checkpoint"],
-    "manage":       ["shell_exec", "check_tasks", "file_write", "file_edit",
-                     "git_checkpoint", "git_log", "git_status"],
+                     "file_write", "file_edit", "file_read"],
+    "manage":       ["shell_exec", "check_tasks", "file_write", "file_edit"],
     "default":      [],  # all tools via fallback
 }
 
@@ -114,18 +113,11 @@ def add_anti_confusion_hints(descriptions: dict[str, str]) -> dict[str, str]:
         "shell_exec": (
             "运行 Shell 命令（可后台执行）。"
             "后台任务完成后用 check_tasks 查看结果。"
+            "git 操作（log/status/reset）也用 shell_exec 直接执行。"
         ),
         "check_tasks": (
             "检查后台 shell_exec 任务的运行状态和输出。"
             "只在 shell_exec 设置了 background=true 后使用。"
-        ),
-        "git_checkpoint": (
-            "保存当前工作区的 git 检查点（commit）。"
-            "查看历史请用 git_log，恢复请用 git_rollback。"
-        ),
-        "git_rollback": (
-            "将工作区恢复到之前的检查点（git reset --hard，会覆盖未保存的更改）。"
-            "先用 git_log 查看历史，确认要恢复到的 commit hash。"
         ),
         "update_notes": (
             "更新项目笔记或论文阅读笔记到知识库。"

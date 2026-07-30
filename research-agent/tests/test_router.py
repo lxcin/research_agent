@@ -73,14 +73,13 @@ class TestToolRouting:
             assert len(filtered) < full_count, f"intent '{intent}' has {len(filtered)}/{full_count} tools"
 
     def test_git_intent_only_git_tools(self):
-        """Git intent exposes git tools."""
+        """Git intent exposes shell_exec — LLM uses git commands directly."""
         registry = get_registry()
         filtered = route_tools("git", registry)
         tool_names = [t["function"]["name"] for t in filtered]
-        # All returned tools should be git_ prefixed
-        git_names = [n for n in tool_names if n.startswith("git_")]
-        assert len(git_names) >= 4  # at least 4 git tools
-        assert len(git_names) == len(tool_names)  # and ONLY git tools
+        # Git intent exposes shell_exec for running git commands
+        assert "shell_exec" in tool_names
+        assert len(tool_names) == 1  # only shell_exec needed
 
     def test_default_exposes_all(self):
         """Default intent should expose most tools."""
@@ -164,7 +163,7 @@ class TestAuditReport:
         assert "total_tools" in report
         assert "warnings" in report
         assert "critical_pairs" in report
-        assert report["total_tools"] >= 17
+        assert report["total_tools"] >= 12
 
 
 if __name__ == "__main__":
