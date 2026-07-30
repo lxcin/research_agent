@@ -492,7 +492,12 @@ def _maybe_compress(project_id: str, llm: LLMProvider):
         if old_turns:
             turns_text = "\n".join([f"用户: {t.user_message}\n助手: {t.assistant_message}" for t in old_turns])
             summary = llm.complete(
-                [{"role": "user", "content": f"将以下对话压缩为简短摘要，保留关键决策、数据、结论:\n{turns_text}"}],
+                [{"role": "user", "content": 
+                    f"将以下对话压缩为摘要，分两个字段输出JSON：\n"
+                    f"1. conclusions: 关键决策、数据、已确认结论（1-2句）\n"
+                    f"2. dead_ends: 尝试过但不可行的方向、被推翻的假设、已验证不可行的方法（保留这些很重要，避免重复犯错）\n"
+                    f"输出JSON: {{\"conclusions\": \"...\", \"dead_ends\": \"...\"}}\n"
+                    f"对话:\n{turns_text}"}],
                 max_tokens=200
             )
             mark_compressed([t.id for t in old_turns if t.id], summary)
@@ -505,8 +510,17 @@ def _maybe_compress(project_id: str, llm: LLMProvider):
                     progress_prompt = f"基于以下对话，用一句话总结当前项目进度（已完成什么、正在做什么、下一步做什么）:\n{turns_text}"
                     progress = llm.complete([{"role": "user", "content": progress_prompt}], max_tokens=100)
                     existing = getattr(project.accumulated_wisdom, 'notes', "") or ""
-                    project.accumulated_wisdom.notes = existing + f"\n[进度] {progress}" if existing else f"[进度] {progress}"
-                    update_project(project)
+                    # Dedup: check if a similar note already exists
+                    should_append = True
+                    if existing:
+                        from difflib import SequenceMatcher
+                        for line in existing.split("\n"):
+                            if SequenceMatcher(None, line, progress).ratio() > 0.75:
+                                should_append = False
+                                break
+                    if should_append:
+                        project.accumulated_wisdom.notes = existing + f"\n[进度] {progress}" if existing else f"[进度] {progress}"
+                        update_project(project)
             except Exception:
                 pass
 

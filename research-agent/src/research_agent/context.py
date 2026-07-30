@@ -47,24 +47,58 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
             proj += f"\n项目摘要: {state.active_project.history_summary}"
         messages.append({"role": "system", "content": proj})
 
-        # Cross-project reference
+        # Cross-project reference: semantic match on topic + intro summary
         from research_agent.store import get_all_projects as gap
         all_projects = gap()
+        # Build candidate pool: project topic + intro_summary
+        candidates = []
         for p in all_projects:
-            if p.id == state.active_project.id: continue
-            if p.topic.lower() in state.user_input.lower():
-                p_notes = getattr(p.accumulated_wisdom, 'notes', '')
+            if p.id == state.active_project.id:
+                continue
+            candidate_text = f"{p.topic} {p.intro_summary or ''}".strip()
+            if candidate_text:
+                candidates.append((p, candidate_text))
+        if candidates and len(state.user_input) > 5:
+            # Simple TF-like scoring: count word overlap (no new dependency)
+            query_words = set(state.user_input.lower().split())
+            scored = []
+            for proj, text in candidates:
+                text_words = set(text.lower().split())
+                if not query_words or not text_words:
+                    scored.append((proj, 0))
+                else:
+                    overlap = len(query_words & text_words) / min(len(query_words), len(text_words))
+                    scored.append((proj, overlap))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            if scored and scored[0][1] > 0.15:  # threshold: >15% word overlap
+                matched_proj = scored[0][0]
+                p_notes = getattr(matched_proj.accumulated_wisdom, 'notes', '')
                 if p_notes:
                     entries = p_notes.strip().split("\n")
-                    messages.append({"role": "system", "content": f"项目「{p.topic}」笔记:\n" + "\n".join(entries[-5:])})
-                break
+                    messages.append({"role": "system",
+                        "content": f"关联项目「{matched_proj.topic}」笔记:\n" + "\n".join(entries[-5:])})
 
     # 4. Conversation history
     if hasattr(state, 'conversation_turns') and state.conversation_turns:
-        summaries = [t.summary for t in state.conversation_turns if t.compressed and t.summary]
+        compressed = [t for t in state.conversation_turns if t.compressed and t.summary]
         recent = [t for t in state.conversation_turns if not t.compressed][-10:]
-        if summaries:
-            messages.append({"role": "system", "content": "历史摘要:\n" + "\n".join(summaries)})
+        if compressed:
+            conclusions_parts = []
+            dead_ends_parts = []
+            for t in compressed:
+                try:
+                    import json
+                    d = json.loads(t.summary)
+                    if d.get("conclusions"):
+                        conclusions_parts.append(d["conclusions"])
+                    if d.get("dead_ends"):
+                        dead_ends_parts.append(d["dead_ends"])
+                except (json.JSONDecodeError, TypeError):
+                    conclusions_parts.append(t.summary)  # legacy plain text
+            if conclusions_parts:
+                messages.append({"role": "system", "content": "历史摘要/结论:\n" + "\n".join(conclusions_parts)})
+            if dead_ends_parts:
+                messages.append({"role": "system", "content": "已验证不可行的方向(避免重复):\n" + "\n".join(dead_ends_parts)})
         if recent:
             messages.append({"role": "system", "content": "最近对话:\n" + format_turns(recent)})
 

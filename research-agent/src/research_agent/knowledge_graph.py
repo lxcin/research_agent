@@ -251,20 +251,44 @@ def _verify_claim_in_text(claim: str, text: str) -> bool:
 
 
 def deduplicate_claims(new_claims: list[Claim], existing_claims: list[Claim],
-                       threshold: float = 0.75) -> list[Claim]:
-    """Remove new claims that are too similar to existing claims."""
+                       threshold: float = 0.75, llm: LLMProvider = None) -> list[Claim]:
+    """Remove new claims that are too similar to existing claims.
+    Uses SequenceMatcher as fast pre-filter, then optionally LLM for directional check."""
     from difflib import SequenceMatcher
     unique = []
+    candidates_for_llm = []  # (new_claim, existing_claim) pairs needing deeper check
     for nc in new_claims:
         duplicate = False
         lower_nc = nc.text.lower()
         for ec in existing_claims:
             ratio = SequenceMatcher(None, lower_nc, ec.text.lower()).ratio()
             if ratio > threshold:
-                duplicate = True
+                # High similarity — check if same claim or opposite claim
+                if llm and ratio < 0.92:  # near-identical (>92%) is safe to dedup
+                    candidates_for_llm.append((nc, ec))
+                else:
+                    duplicate = True
                 break
-        if not duplicate:
+        if not duplicate and not any(c[0] is nc for c in candidates_for_llm):
             unique.append(nc)
+
+    # LLM directional check: "same referent, opposite stance" should NOT be deduped
+    if candidates_for_llm and llm:
+        for nc, ec in candidates_for_llm:
+            prompt = (
+                f"判断以下两个claim是重复(duplicate)、相反观点(opposite)还是不相关(unrelated)。\n"
+                f"Claim A: {ec.text}\nClaim B: {nc.text}\n"
+                f"注意：如果它们讨论同一概念但结论相反，输出 opposite（不能去重）。"
+                f"如果它们表述不同但意思相同，输出 duplicate。\n"
+                f"只输出一个词: duplicate/opposite/unrelated"
+            )
+            try:
+                raw = llm.complete([{"role": "user", "content": prompt}], max_tokens=10)
+                verdict = raw.strip().lower()
+                if verdict == "opposite":
+                    unique.append(nc)  # keep! opposite claims must both exist
+            except Exception:
+                pass
     return unique
 
 
@@ -334,7 +358,7 @@ def build_global_graph_on_ingest(paper_id: str, text: str, llm: LLMProvider) -> 
     kg = load_graph()
     existing_claims = [kg.graph.nodes[n]["claim"] for n in kg.graph.nodes
                        if kg.graph.nodes[n].get("claim")]
-    new_claims = deduplicate_claims(new_claims, existing_claims)
+    new_claims = deduplicate_claims(new_claims, existing_claims, llm=llm)
 
     for claim in new_claims:
         save_claim(claim)
