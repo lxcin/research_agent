@@ -83,7 +83,8 @@ def add_anti_confusion_hints(descriptions: dict[str, str]) -> dict[str, str]:
             "当本地没有结果时，应改用 search_papers 搜索 arXiv。"
         ),
         "search_papers": (
-            "从 arXiv 搜索新论文并自动导入本地知识库。"
+            "从 arXiv 搜索新论文，返回论文列表（不自动摄入）。"
+            "需要阅读具体论文时用 read_paper，首次 read 时自动摄入。"
             "搜索前应先用 retrieve 检查本地是否已有。"
         ),
         "read_paper": (

@@ -29,12 +29,11 @@ def _handle_retrieve(params: dict, llm, state, emit) -> ToolResult:
 
 
 def _handle_search(params: dict, llm, state, emit) -> ToolResult:
+    """Search arXiv for papers. Returns metadata only — no auto-ingestion.
+    LLM must call read_paper to ingest specific papers into the knowledge base."""
     query = params.get("query", "")
     if not query.strip():
         return ToolResult.fail("Missing query parameter")
-
-    pid = getattr(state, 'active_project', None)
-    project_id = getattr(pid, 'id', None) if pid else None
 
     from research_agent.search import search_papers
 
@@ -43,14 +42,22 @@ def _handle_search(params: dict, llm, state, emit) -> ToolResult:
 
     if not papers:
         emit("tool", {"tool": "arxiv", "status": "empty", "query": query})
-        return ToolResult(success=False, data={"found": 0})
+        return ToolResult.fail("No papers found on arXiv")
 
     emit("tool", {"tool": "arxiv", "status": "found", "count": len(papers),
            "papers": [{"title": p["title"], "year": p.get("year", 0)} for p in papers]})
 
+    # Optional LLM relevance filter
     if llm and len(papers) > 1:
-        papers_list = "\n".join([f"{i+1}. [{p['title']}] {p.get('abstract', '')[:200]}" for i, p in enumerate(papers)])
-        filter_prompt = f"判断以下论文是否与查询\"{query}\"相关。只输出相关的论文编号（逗号分隔），如 \"1,3,5\"。全部不相关输出 \"none\"。\n{papers_list}\n输出："
+        papers_list = "\n".join(
+            f"{i+1}. [{p['title']}] {p.get('abstract', '')[:200]}"
+            for i, p in enumerate(papers)
+        )
+        filter_prompt = (
+            f"判断以下论文是否与查询\"{query}\"相关。"
+            f"只输出相关的论文编号（逗号分隔），如 \"1,3,5\"。全部不相关输出 \"none\"。\n"
+            f"{papers_list}\n输出："
+        )
         try:
             raw = llm.complete([{"role": "user", "content": filter_prompt}], max_tokens=50)
             raw = raw.strip()
@@ -63,71 +70,24 @@ def _handle_search(params: dict, llm, state, emit) -> ToolResult:
         except Exception:
             pass
 
-    ingested = 0
-    ingested_papers = []
+    # Return search results as data — NO ingestion
+    # LLM decides which papers to read; read_paper handles ingestion
+    results = []
     for p in papers:
-        if not p.get("abstract"):
-            continue
-        existing = deduplicate_by_title(p["title"])
-        if existing:
-            emit("tool", {"tool": "ingest", "status": "duplicate", "title": p["title"]})
-            continue
+        results.append({
+            "paper_id": p.get("arxiv_id", ""),
+            "title": p.get("title", ""),
+            "authors": p.get("authors", [])[:5],
+            "year": p.get("year", 0),
+            "abstract": p.get("abstract", "")[:500],
+            "source": "arxiv",
+        })
 
-        text = (f"Title: {p['title']}\nAuthors: {', '.join(p.get('authors', []))}\n"
-                f"Year: {p.get('year', '')}\nVenue: {p.get('venue', '')}\n\nAbstract: {p['abstract']}")
-        emit("tool", {"tool": "ingest", "status": "ingesting", "title": p["title"]})
-        paper, msg = ingest_text(
-            text=text, title=p["title"], doi=f"arxiv:{p.get('arxiv_id', '')}",
-            year=p.get("year", 0), authors=p.get("authors", []),
-            citation_count=p.get("citation_count", 0), abstract=p.get("abstract", ""),
-        )
-        if paper:
-            ingested += 1
-            ingested_papers.append(p)
-            pid_obj = getattr(state, 'active_project', None)
-            if pid_obj and getattr(pid_obj, 'id', None):
-                from research_agent.store import link_paper_to_project
-                link_paper_to_project(paper.id, pid_obj.id)
-            if llm:
-                try:
-                    from research_agent.knowledge_graph import build_global_graph_on_ingest
-                    import threading
-                    t = threading.Thread(target=build_global_graph_on_ingest, args=(paper.id, text, llm), daemon=True)
-                    t.start()
-                except Exception:
-                    pass
-            try:
-                from research_agent.tools.builtin.filesystem import _get_project_dir
-                ws = _get_project_dir(state)
-                papers_dir = os.path.join(ws, "papers")
-                if not os.path.exists(papers_dir): os.makedirs(papers_dir)
-                safe_name = p.get("arxiv_id", paper.id).replace("/", "_").replace("\\", "_")
-                md_path = os.path.join(papers_dir, f"{safe_name}.md")
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(f"# {p['title']}\n\n**Authors**: {', '.join(p.get('authors', []))}\n"
-                            f"**Year**: {p.get('year', '')}\n**arXiv**: {p.get('arxiv_id', '')}\n"
-                            f"**Venue**: {p.get('venue', '')}\n\n## Abstract\n{p.get('abstract', '')}\n")
-                emit("tool", {"tool": "ingest", "status": "file_saved", "title": p["title"]})
-            except Exception:
-                pass
-        else:
-            emit("tool", {"tool": "ingest", "status": "error", "title": p["title"], "error": msg[:80]})
-
-    if ingested == 0:
-        emit("tool", {"tool": "ingest", "status": "failed", "reason": "no new papers ingested"})
-        return ToolResult(success=False, data={"found": 0, "ingested": 0})
-
-    emit("tool", {"tool": "ingest", "status": "done", "count": ingested})
-    build_bm25_index()
-    results = hybrid_search(query, n_results=5, project_id=project_id)
-    emit("tool", {"tool": "retrieve", "status": "done", "chunks": len(results)})
-
-    titles = [p["title"] for p in ingested_papers]
-    paper_ids = list({c.get("paper_id", "") for c in results if c.get("paper_id")})
-    return ToolResult(success=True, chunks=results, data={
-        "found": len(papers), "ingested": ingested,
-        "titles": titles, "chunks": len(results), "paper_ids": paper_ids,
-    })
+    return ToolResult.ok(
+        found=len(results),
+        papers=results,
+        hint="调用 read_paper 摄入并阅读感兴趣的论文。",
+    )
 
 
 retrieve_tool = ToolSchema(
@@ -139,23 +99,90 @@ retrieve_tool = ToolSchema(
 
 search_tool = ToolSchema(
     name="search_papers",
-    description="在 arXiv 搜索最新论文并自动摄入知识库。本地检索无结果或不足时使用。",
+    description=(
+        "在 arXiv 搜索最新论文，返回论文列表（标题、摘要、作者、年份）。"
+        "不会自动摄入知识库——需要读哪篇请用 read_paper，首次读取时自动摄入。"
+    ),
     parameters={"type": "object", "properties": {"query": {"type": "string", "description": "英文搜索关键词"}}, "required": ["query"]},
     handler=_handle_search, category="builtin",
 )
 
 
 def _handle_read_paper(params: dict, llm, state, emit) -> ToolResult:
-    from research_agent.ingestion import recall_full_paper
+    from research_agent.ingestion import recall_full_paper, ingest_text, deduplicate_by_title
     pid = params.get("paper_id", "")
-    if not pid: return ToolResult.fail("Missing paper_id")
+    if not pid:
+        return ToolResult.fail("Missing paper_id")
+
     emit("tool", {"tool": "read_paper", "status": "start", "paper_id": pid})
     text = recall_full_paper(pid)
-    if not text: return ToolResult.fail("Paper not found")
+
+    # If not in local DB, fetch from arXiv and ingest on first read
+    if not text:
+        emit("tool", {"tool": "read_paper", "status": "fetching", "paper_id": pid})
+        try:
+            from research_agent.search import get_paper_metadata
+            meta = get_paper_metadata(pid, id_type="arxiv")
+            if meta and meta.get("abstract"):
+                # Check dedup before ingesting
+                existing = deduplicate_by_title(meta["title"])
+                if not existing:
+                    ingest_body = (
+                        f"Title: {meta['title']}\n"
+                        f"Authors: {', '.join(meta.get('authors', []))}\n"
+                        f"Year: {meta.get('year', '')}\n\n"
+                        f"Abstract: {meta['abstract']}"
+                    )
+                    paper, msg = ingest_text(
+                        text=ingest_body,
+                        title=meta["title"],
+                        doi=f"arxiv:{meta.get('arxiv_id', pid)}",
+                        year=meta.get("year", 0),
+                        authors=meta.get("authors", []),
+                        abstract=meta.get("abstract", ""),
+                    )
+                    if paper:
+                        emit("tool", {"tool": "ingest", "status": "auto_ingested",
+                               "title": meta["title"][:80]})
+                        # Link to project
+                        pid_obj = getattr(state, 'active_project', None)
+                        if pid_obj and getattr(pid_obj, 'id', None):
+                            from research_agent.store import link_paper_to_project
+                            link_paper_to_project(paper.id, pid_obj.id)
+                        # Save workspace markdown
+                        try:
+                            from research_agent.tools.builtin.filesystem import _get_project_dir
+                            ws = _get_project_dir(state)
+                            papers_dir = os.path.join(ws, "papers")
+                            if not os.path.exists(papers_dir):
+                                os.makedirs(papers_dir)
+                            safe_name = meta.get("arxiv_id", paper.id).replace("/", "_").replace("\\", "_")
+                            md_path = os.path.join(papers_dir, f"{safe_name}.md")
+                            with open(md_path, "w", encoding="utf-8") as f:
+                                f.write(
+                                    f"# {meta['title']}\n\n"
+                                    f"**Authors**: {', '.join(meta.get('authors', []))}\n"
+                                    f"**Year**: {meta.get('year', '')}\n"
+                                    f"**arXiv**: {meta.get('arxiv_id', pid)}\n\n"
+                                    f"## Abstract\n{meta['abstract']}\n"
+                                )
+                        except Exception:
+                            pass
+                    text = ingest_body
+                else:
+                    text = recall_full_paper(existing.id) or meta.get("abstract", "")
+            else:
+                return ToolResult.fail(f"Cannot fetch paper: {pid}")
+        except Exception as e:
+            return ToolResult.fail(f"Failed to fetch paper: {e}")
+
+    if not text:
+        return ToolResult.fail("Paper not found")
+
     words = text.split()
     truncated = " ".join(words[:4000]) if len(words) > 4000 else text
 
-    # Get structured metadata from ChromaDB summary doc
+    # Get structured metadata
     title = ""
     authors = []
     year = 0
@@ -199,8 +226,11 @@ def _handle_read_paper(params: dict, llm, state, emit) -> ToolResult:
 
 read_paper_tool = ToolSchema(
     name="read_paper",
-    description="读取已摄入论文的完整内容。用于深度理解论文细节。",
-    parameters={"type": "object", "properties": {"paper_id": {"type": "string", "description": "论文 ID"}}, "required": ["paper_id"]},
+    description=(
+        "读取论文完整内容用于深度理解。如果是 arXiv ID 且尚未摄入，"
+        "会自动从 arXiv 获取并摄入知识库（首次读取时）。"
+    ),
+    parameters={"type": "object", "properties": {"paper_id": {"type": "string", "description": "论文 ID（arXiv ID 或本地 ID）"}}, "required": ["paper_id"]},
     handler=_handle_read_paper, category="builtin",
 )
 
