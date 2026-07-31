@@ -20,8 +20,21 @@ def _handle_retrieve(params: dict, llm, state, emit) -> ToolResult:
     if results:
         emit("tool", {"tool": "retrieve", "status": "done", "chunks": len(results)})
         paper_ids = list({c.get("paper_id", "") for c in results if c.get("paper_id")})
+        # Extract title/snippet per chunk so LLM can decide which papers to read
+        items = []
+        seen = set()
+        for c in results:
+            pid = c.get("paper_id", "")
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            items.append({
+                "paper_id": pid,
+                "text_snippet": c.get("text", "")[:200],
+            })
         return ToolResult(success=True, chunks=results, data={
-            "found": len(results), "source": "local", "paper_ids": paper_ids,
+            "found": len(results), "source": "local",
+            "paper_ids": paper_ids, "items": items,
         })
 
     emit("tool", {"tool": "retrieve", "status": "local_empty", "query": query})
