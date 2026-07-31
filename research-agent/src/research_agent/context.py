@@ -102,11 +102,7 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
         if recent:
             messages.append({"role": "system", "content": "最近对话:\n" + format_turns(recent)})
 
-    # 5. Retrieved context
-    if state.retrieved_context:
-        messages.append({"role": "system", "content": "检索结果:\n" + format_retrieved(state.retrieved_context)})
-
-    # 6. Skill / Workflow (injected as system message before user input)
+    # 5. Skill / Workflow (injected as system message before user input)
     user_lower = state.user_input.lower()
     # External skills (YAML .md files) take priority over hardcoded workflow
     from research_agent.skill_loader import load_skills_from_dir, get_active_skills_context
