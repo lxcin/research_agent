@@ -5,6 +5,39 @@ from research_agent.retrieval import hybrid_search, build_bm25_index
 from research_agent.ingestion import ingest_text, deduplicate_by_title
 
 
+def _save_paper_workspace(state, meta: dict, paper):
+    """Save paper markdown to workspace papers/ directory."""
+    try:
+        from research_agent.tools.builtin.filesystem import _get_project_dir
+        ws = _get_project_dir(state)
+        papers_dir = os.path.join(ws, "papers")
+        if not os.path.exists(papers_dir):
+            os.makedirs(papers_dir)
+        safe_name = meta.get("arxiv_id", paper.id).replace("/", "_").replace("\\", "_")
+        md_path = os.path.join(papers_dir, f"{safe_name}.md")
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(
+                f"# {meta.get('title', '')}\n\n"
+                f"**Authors**: {', '.join(meta.get('authors', []))}\n"
+                f"**Year**: {meta.get('year', '')}\n"
+                f"**arXiv**: {meta.get('arxiv_id', '')}\n\n"
+                f"## Abstract\n{meta.get('abstract', '')}\n"
+            )
+    except Exception:
+        pass
+
+
+def _link_to_project(state, paper):
+    """Link ingested paper to active project."""
+    try:
+        pid_obj = getattr(state, 'active_project', None)
+        if pid_obj and getattr(pid_obj, 'id', None):
+            from research_agent.store import link_paper_to_project
+            link_paper_to_project(paper.id, pid_obj.id)
+    except Exception:
+        pass
+
+
 def _handle_retrieve(params: dict, llm, state, emit) -> ToolResult:
     query = params.get("query", "")
     if not query.strip():
@@ -139,78 +172,72 @@ def _handle_read_paper(params: dict, llm, state, emit) -> ToolResult:
         return ToolResult.fail("Missing paper_id")
 
     emit("tool", {"tool": "read_paper", "status": "start", "paper_id": pid})
+
+    # 1. Try existing full text from ChromaDB (idempotent)
     text = recall_full_paper(pid)
+    if text:
+        emit("tool", {"tool": "read_paper", "status": "found", "paper_id": pid})
+        return _build_read_result(pid, text, state, "全文 (本地)")
 
-    # If not in local DB, fetch from arXiv and ingest on first read
-    if not text:
-        emit("tool", {"tool": "read_paper", "status": "fetching", "paper_id": pid})
-        try:
-            from research_agent.search import get_paper_metadata
-            meta = get_paper_metadata(pid, id_type="arxiv")
-            if meta and meta.get("abstract"):
-                # Check dedup before ingesting
-                existing = deduplicate_by_title(meta["title"])
-                if not existing:
-                    ingest_body = (
-                        f"Title: {meta['title']}\n"
-                        f"Authors: {', '.join(meta.get('authors', []))}\n"
-                        f"Year: {meta.get('year', '')}\n\n"
-                        f"Abstract: {meta['abstract']}"
-                    )
-                    paper, msg = ingest_text(
-                        text=ingest_body,
-                        title=meta["title"],
-                        doi=f"arxiv:{meta.get('arxiv_id', pid)}",
-                        year=meta.get("year", 0),
-                        authors=meta.get("authors", []),
-                        abstract=meta.get("abstract", ""),
-                    )
-                    if paper:
-                        emit("tool", {"tool": "ingest", "status": "auto_ingested",
-                               "title": meta["title"][:80]})
-                        # Link to project
-                        pid_obj = getattr(state, 'active_project', None)
-                        if pid_obj and getattr(pid_obj, 'id', None):
-                            from research_agent.store import link_paper_to_project
-                            link_paper_to_project(paper.id, pid_obj.id)
-                        # Save workspace markdown
-                        try:
-                            from research_agent.tools.builtin.filesystem import _get_project_dir
-                            ws = _get_project_dir(state)
-                            papers_dir = os.path.join(ws, "papers")
-                            if not os.path.exists(papers_dir):
-                                os.makedirs(papers_dir)
-                            safe_name = meta.get("arxiv_id", paper.id).replace("/", "_").replace("\\", "_")
-                            md_path = os.path.join(papers_dir, f"{safe_name}.md")
-                            with open(md_path, "w", encoding="utf-8") as f:
-                                f.write(
-                                    f"# {meta['title']}\n\n"
-                                    f"**Authors**: {', '.join(meta.get('authors', []))}\n"
-                                    f"**Year**: {meta.get('year', '')}\n"
-                                    f"**arXiv**: {meta.get('arxiv_id', pid)}\n\n"
-                                    f"## Abstract\n{meta['abstract']}\n"
-                                )
-                        except Exception:
-                            pass
-                    text = ingest_body
-                else:
-                    text = recall_full_paper(existing.id) or meta.get("abstract", "")
-            else:
-                return ToolResult.fail(f"Cannot fetch paper: {pid}")
-        except Exception as e:
-            return ToolResult.fail(f"Failed to fetch paper: {e}")
+    # 2. Fetch metadata + abstract from arXiv (fast, synchronous)
+    emit("tool", {"tool": "read_paper", "status": "fetching", "paper_id": pid})
+    try:
+        from research_agent.search import get_paper_metadata
+        meta = get_paper_metadata(pid, id_type="arxiv")
+        if not meta or not meta.get("abstract"):
+            return ToolResult.fail(f"Cannot fetch paper: {pid}")
+    except Exception as e:
+        return ToolResult.fail(f"Failed to fetch metadata: {e}")
 
-    if not text:
-        return ToolResult.fail("Paper not found")
+    title = meta.get("title", "")
+    abstract = meta.get("abstract", "")
 
+    # 3. Check dedup, then ingest abstract immediately
+    existing = deduplicate_by_title(title)
+    if existing:
+        text = recall_full_paper(existing.id) or abstract
+    else:
+        ingest_body = (
+            f"Title: {title}\n"
+            f"Authors: {', '.join(meta.get('authors', []))}\n"
+            f"Year: {meta.get('year', '')}\n\n"
+            f"Abstract: {abstract}"
+        )
+        paper, msg = ingest_text(
+            text=ingest_body, title=title,
+            doi=f"arxiv:{meta.get('arxiv_id', pid)}",
+            year=meta.get("year", 0), authors=meta.get("authors", []),
+            abstract=abstract,
+        )
+        if paper:
+            emit("tool", {"tool": "ingest", "status": "abstract_ingested", "title": title[:80]})
+            _save_paper_workspace(state, meta, paper)
+            _link_to_project(state, paper)
+        text = ingest_body
+
+    # 4. Kick off async PDF download for full text
+    emit("tool", {"tool": "read_paper", "status": "pdf_downloading",
+           "hint": "PDF downloading in background, available next read"})
+    try:
+        import json as _json
+        def _on_pdf_done(full_text):
+            emit("tool", {"tool": "read_paper", "status": "pdf_ready",
+                   "hint": f"PDF fully ingested for {pid}"})
+
+        from research_agent.tools.arxiv_pdf import ingest_arxiv_async
+        ingest_arxiv_async(pid, meta, on_done=_on_pdf_done)
+    except Exception:
+        pass
+
+    return _build_read_result(pid, text, state, f"摘要 (PDF下载中，下次阅读可得全文)")
+
+
+def _build_read_result(pid: str, text: str, state, source: str = "") -> ToolResult:
+    """Build read_paper ToolResult with metadata lookup."""
     words = text.split()
     truncated = " ".join(words[:4000]) if len(words) > 4000 else text
 
-    # Get structured metadata
-    title = ""
-    authors = []
-    year = 0
-    doi = ""
+    title = ""; authors = []; year = 0; doi = ""
     try:
         from research_agent.vector_store import get_collection
         coll = get_collection()
@@ -231,31 +258,47 @@ def _handle_read_paper(params: dict, llm, state, emit) -> ToolResult:
         project = get_project(state.active_project.id) if state.active_project else None
         if project:
             existing = getattr(project.accumulated_wisdom, 'notes', "") or ""
-            note_entry = f"[read] {title[:80] or pid} ({year})" if title else f"[read] paper {pid}"
+            note_entry = f"[read] {title[:80] or pid} ({year})"
             project.accumulated_wisdom.notes = existing + "\n" + note_entry if existing else note_entry
             update_project(project)
     except Exception:
         pass
 
     return ToolResult.ok(
-        paper_id=pid,
-        title=title,
-        authors=authors[:5],
-        year=year,
-        doi=doi,
-        full_text=truncated,
-        length=len(truncated),
+        paper_id=pid, title=title, authors=authors[:5], year=year, doi=doi,
+        full_text=truncated, length=len(truncated),
+        source=source,
     )
 
 
 read_paper_tool = ToolSchema(
     name="read_paper",
     description=(
-        "读取论文完整内容用于深度理解。如果是 arXiv ID 且尚未摄入，"
-        "会自动从 arXiv 获取并摄入知识库（首次读取时）。"
+        "读取论文内容。首次读取返回摘要，同时异步下载并摄入PDF全文（下次读取可得完整论文）。"
+        "已摄入的论文直接返回完整内容。"
     ),
     parameters={"type": "object", "properties": {"paper_id": {"type": "string", "description": "论文 ID（arXiv ID 或本地 ID）"}}, "required": ["paper_id"]},
     handler=_handle_read_paper, category="builtin",
+)
+
+
+def _handle_delete_paper(params: dict, llm, state, emit) -> ToolResult:
+    """Delete a paper from the knowledge base."""
+    pid = params.get("paper_id", "")
+    if not pid:
+        return ToolResult.fail("Missing paper_id")
+    from research_agent.tools.arxiv_pdf import delete_paper_from_kb
+    ok = delete_paper_from_kb(pid)
+    if ok:
+        return ToolResult.ok(deleted=pid, message="Paper removed from knowledge base")
+    return ToolResult.fail(f"Failed to delete paper: {pid}")
+
+
+delete_paper_tool = ToolSchema(
+    name="delete_paper",
+    description="从知识库中删除一篇论文（ChromaDB + SQLite + 工作区）。",
+    parameters={"type": "object", "properties": {"paper_id": {"type": "string", "description": "论文 ID"}}, "required": ["paper_id"]},
+    handler=_handle_delete_paper, category="builtin",
 )
 
 
