@@ -345,7 +345,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                    "hint": f"检索次数已达上限({MAX_SEARCH_CALLS})，选最好的论文用 read_paper 读，或直接基于当前结果回答"})
             messages.append({"role": "system",
                 "content": f"检索次数已达上限({MAX_SEARCH_CALLS}次)。请从已有结果中选出最相关的论文用 read_paper 阅读，或直接基于当前检索结果回答。不要再调用 search_papers。"})
-            total_search_rounds = 0  # reset so we don't double-trigger
+            # Don't reset counter — keep blocking subsequent calls
         if total_retries >= MAX_TOTAL_RETRIES:
             _emit(on_event, "step", {"step": "giving_up", "text": "重试次数已达上限"})
             state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)

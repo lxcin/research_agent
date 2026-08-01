@@ -96,10 +96,21 @@ def _handle_search(params: dict, llm, state, emit) -> ToolResult:
             "source": "arxiv",
         })
 
+    # Format as readable text for tool result message (LLM sees this)
+    readable = []
+    for i, r in enumerate(results):
+        readable.append(
+            f"[{i+1}] {r['title']}\n"
+            f"    ID: {r['paper_id']} | {r['year']} | {', '.join(r['authors'][:3])}\n"
+            f"    {r['abstract']}"
+        )
+    result_text = "检索到以下论文:\n\n" + "\n\n".join(readable)
+
     return ToolResult.ok(
         found=len(results),
         papers=results,
-        hint="调用 read_paper 摄入并阅读感兴趣的论文。",
+        hint="选择感兴趣的论文使用 read_paper 阅读全文。",
+        _formatted=result_text,
     )
 
 
