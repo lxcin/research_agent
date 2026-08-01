@@ -18,6 +18,7 @@ from research_agent.config import get_temperature, get_max_output_tokens
 
 MAX_ROUNDS = 5
 MAX_TOTAL_RETRIES = 5
+MAX_SEARCH_CALLS = 2  # max search_papers calls per run — force read after
 
 EventCallback = Callable[[str, dict], None]
 
@@ -339,6 +340,12 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             _emit(on_event, "step", {"step": "giving_up", "text": "已尝试多次搜索无果，直接回答..."})
             state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)
             break
+        if total_search_rounds >= MAX_SEARCH_CALLS:
+            _emit(on_event, "tool", {"tool": "hint", "status": "search_limit",
+                   "hint": f"检索次数已达上限({MAX_SEARCH_CALLS})，选最好的论文用 read_paper 读，或直接基于当前结果回答"})
+            messages.append({"role": "system",
+                "content": f"检索次数已达上限({MAX_SEARCH_CALLS}次)。请从已有结果中选出最相关的论文用 read_paper 阅读，或直接基于当前检索结果回答。不要再调用 search_papers。"})
+            total_search_rounds = 0  # reset so we don't double-trigger
         if total_retries >= MAX_TOTAL_RETRIES:
             _emit(on_event, "step", {"step": "giving_up", "text": "重试次数已达上限"})
             state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)
@@ -388,6 +395,14 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                     if round_retry >= 2:
                         hint += " 请直接回答，不要调用工具。"
                     _emit(on_event, "tool", {"tool": tc["name"], "status": "unknown", "hint": hint[:80]})
+                    messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                     "content": json.dumps({"error": hint}, ensure_ascii=False)})
+                    continue
+
+                # Block search_papers after limit
+                if tc["name"] == "search_papers" and total_search_rounds >= MAX_SEARCH_CALLS:
+                    hint = f"搜索次数已达上限({MAX_SEARCH_CALLS})。请用 read_paper 或直接基于已有结果回答。"
+                    _emit(on_event, "tool", {"tool": tc["name"], "status": "blocked", "hint": hint})
                     messages.append({"role": "tool", "tool_call_id": tc["id"],
                                      "content": json.dumps({"error": hint}, ensure_ascii=False)})
                     continue
@@ -457,14 +472,12 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
 
         # ── No tool calls → text response ──
         _emit(on_event, "step", {"step": "generate", "text": "生成回答..."})
-        tool_msgs = [m for m in messages if m["role"] in ("tool",)]
-        generate_msgs = [
-            {"role": "system", "content": "=== 以下是所有工具调用结果（包括读过的论文全文） ==="},
-            *tool_msgs,
-            {"role": "system", "content": "=== 以上是工具结果。现在基于这些结果回答用户问题。引用时用 [N] 标注。 ==="},
-            {"role": "user", "content": state.user_input},
-        ]
-        state.final_response = _stream_response(llm, generate_msgs, on_event)
+        # Strip tool messages for final response — DeepSeek requires strict ordering
+        clean_msgs = [m for m in messages if m["role"] in ("system", "user")]
+        clean_msgs.append({"role": "system",
+            "content": "基于以上检索结果和对话历史，回答用户问题。引用具体信息。回答使用与用户相同的语言。"})
+        clean_msgs.append({"role": "user", "content": state.user_input})
+        state.final_response = _stream_response(llm, clean_msgs, on_event)
         break
 
     # ── If no response generated yet (shouldn't happen with function calling) ──
