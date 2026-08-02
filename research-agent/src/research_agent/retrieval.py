@@ -14,9 +14,17 @@ def _tokenize_doc(text: str) -> list[str]:
 
 
 def _tokenize_query(query: str) -> list[str]:
+    """Tokenize query for BM25. Chinese queries also include embedded English tokens."""
+    tokens = []
     if any('\u4e00' <= c <= '\u9fff' for c in query):
-        return list(jieba.cut(query))
-    return query.split()
+        tokens = list(jieba.cut(query))
+        # Bilingual boost: extract English/alphanumeric tokens from mixed query
+        import re
+        en_tokens = re.findall(r'[a-zA-Z0-9]+', query)
+        tokens += en_tokens
+    else:
+        tokens = query.split()
+    return tokens
 
 
 @lru_cache(maxsize=1)
