@@ -138,12 +138,13 @@ def _handle_search(params: dict, llm, state, emit) -> ToolResult:
             f"    {r['abstract']}"
         )
     result_text = "检索到以下论文:\n\n" + "\n\n".join(readable)
+    result_text += f"\n\n下一步: 选择一篇论文，用 read_paper(paper_id=\"{results[0]['paper_id'] if results else ''}\") 读全文。不要用 retrieve——retrieve 搜本地，搜不到刚找到的 arXiv 论文。"
 
     return ToolResult.ok(
         found=len(results),
         papers=results,
-        hint="选择感兴趣的论文使用 read_paper 阅读全文。",
         _formatted=result_text,
+        hint="用 read_paper(paper_id=\"...\") 读全文，不用 retrieve",
     )
 
 

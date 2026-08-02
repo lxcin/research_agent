@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 INTENT_ROUTES: dict[str, list[str]] = {
     "retrieve":     ["retrieve", "search_papers", "read_paper", "update_notes"],
     "read":         ["read_paper", "file_read", "retrieve", "update_notes"],
-    "search":       ["search_papers", "retrieve", "read_paper"],
+    "search":       ["search_papers", "read_paper"],  # search → read, NOT retrieve
     "write":        ["file_write", "file_edit", "file_read", "file_glob"],
     "execute":      ["shell_exec", "check_tasks", "file_read", "file_write"],
     "git":          ["shell_exec"],   # LLM uses shell_exec for git commands
