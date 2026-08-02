@@ -150,7 +150,11 @@ def _handle_search(params: dict, llm, state, emit) -> ToolResult:
 
 retrieve_tool = ToolSchema(
     name="retrieve",
-    description="搜索本地论文知识库。先搜本地，无结果或不足时考虑 search_papers。",
+    description=(
+        "搜索本地知识库中已读过的论文。仅搜本地，不搜互联网。"
+        "如果 found=0 或结果不足，改用 search_papers 去 arXiv 搜索。"
+        "注意：search_papers 返回的论文不在本地，不能用 retrieve 找——直接用 read_paper(paper_id) 读。"
+    ),
     parameters={"type": "object", "properties": {"query": {"type": "string", "description": "搜索关键词"}}, "required": ["query"]},
     handler=_handle_retrieve, category="builtin",
 )
@@ -158,8 +162,9 @@ retrieve_tool = ToolSchema(
 search_tool = ToolSchema(
     name="search_papers",
     description=(
-        "在 arXiv 搜索最新论文，返回论文列表（标题、摘要、作者、年份）。"
-        "不会自动摄入知识库——需要读哪篇请用 read_paper，首次读取时自动摄入。"
+        "在 arXiv 搜索最新论文，返回摘要列表（不自动存入本地）。"
+        "找到论文后，直接用 read_paper(paper_id='...') 读取全文——不要用 retrieve。"
+        "每次运行最多调用 2 次。"
     ),
     parameters={"type": "object", "properties": {"query": {"type": "string", "description": "英文搜索关键词"}}, "required": ["query"]},
     handler=_handle_search, category="builtin",
@@ -275,8 +280,8 @@ def _build_read_result(pid: str, text: str, state, source: str = "") -> ToolResu
 read_paper_tool = ToolSchema(
     name="read_paper",
     description=(
-        "读取论文内容。首次读取返回摘要，同时异步下载并摄入PDF全文（下次读取可得完整论文）。"
-        "已摄入的论文直接返回完整内容。"
+        "读论文全文。传入 search_papers 返回的 arXiv ID，或 retrieve 查到的本地 ID 都可以。"
+        "首次读取时自动下载 PDF 全文并摄入本地知识库，后续可被 retrieve 找到。"
     ),
     parameters={"type": "object", "properties": {"paper_id": {"type": "string", "description": "论文 ID（arXiv ID 或本地 ID）"}}, "required": ["paper_id"]},
     handler=_handle_read_paper, category="builtin",

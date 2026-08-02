@@ -327,7 +327,6 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     total_search_rounds = 0
     total_retries = 0
     consecutive_retrieve_few = 0  # retrieve rounds with < 3 results
-    search_papers_found = False  # once search finds results, drop retrieve
 
     model_name = getattr(llm, "model", "")
     messages = build_context(state, registry, model_name)
@@ -336,10 +335,6 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
 
     for round_num in range(1, MAX_ROUNDS + 1):
         state.round_count = round_num
-        # Dynamic tool filtering: once search_papers found results, drop retrieve
-        # — LLM should use read_paper to access those results, not re-search locally
-        if search_papers_found:
-            tools_list = [t for t in tools_list if t["function"]["name"] != "retrieve"]
 
         if total_search_rounds >= 3 and consecutive_empty >= 2:
             _emit(on_event, "step", {"step": "giving_up", "text": "已尝试多次搜索无果，直接回答..."})
@@ -432,9 +427,6 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                 # Success
                 messages.append({"role": "tool", "tool_call_id": tc["id"],
                                  "content": json.dumps(result.data, ensure_ascii=False)})
-
-                if tc["name"] == "search_papers" and result.data.get("found", 0) > 0:
-                    search_papers_found = True
 
                 if result.chunks:
                     state.retrieved_context = _deduplicate_results(result.chunks)
