@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 INTENT_ROUTES: dict[str, list[str]] = {
     "retrieve":     ["retrieve", "search_papers", "read_paper", "update_notes"],
     "read":         ["read_paper", "file_read", "retrieve", "update_notes"],
-    "search":       ["search_papers", "read_paper"],  # search → read, NOT retrieve
+    "search":       ["search_papers", "retrieve", "read_paper"],
     "write":        ["file_write", "file_edit", "file_read", "file_glob"],
     "execute":      ["shell_exec", "check_tasks", "file_read", "file_write"],
     "git":          ["shell_exec"],   # LLM uses shell_exec for git commands
@@ -79,17 +79,16 @@ def add_anti_confusion_hints(descriptions: dict[str, str]) -> dict[str, str]:
     # Pairs that LLMs often confuse: {name: "not_for_description"}
     confusion_map = {
         "retrieve": (
-            "检索本地知识库中的论文片段和笔记。"
-            "当本地没有结果时，应改用 search_papers 搜索 arXiv。"
+            "在本地知识库中搜索已存储的论文。仅搜本地。"
+            "注意：刚用 search_papers 在 arXiv 找到的论文不在本地，不能用 retrieve 找它——直接用 read_paper(paper_id) 读。"
         ),
         "search_papers": (
-            "从 arXiv 搜索新论文，返回论文列表（不自动摄入）。"
-            "需要阅读具体论文时用 read_paper，首次 read 时自动摄入。"
-            "搜索前应先用 retrieve 检查本地是否已有。"
+            "在 arXiv 搜索论文，返回摘要列表。不会自动储存。"
+            "找到论文后，直接用 read_paper(paper_id='...') 读取全文。不要用 retrieve。"
         ),
         "read_paper": (
-            "读取本地知识库中已存储论文的完整内容。"
-            "如果需要读的文件是用户上传的或新写的，用 file_read 代替。"
+            "读论文全文。传入 search_papers 返回的 paper_id，或本地 retrieve 到的 paper_id 都可以。"
+            "首次读取时自动摄入知识库，后续可直接检索。"
         ),
         "file_read": (
             "读取项目工作区中的原始文件内容（代码、笔记、数据文件）。"
