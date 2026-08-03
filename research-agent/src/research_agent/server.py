@@ -232,6 +232,14 @@ async def update_project(project_id: str, req: ProjectUpdate):
     return {"id": proj.id, "topic": proj.topic, "workspace_dir": proj.workspace_dir}
 
 
+@app.get("/api/projects/{project_id}/conversations")
+async def get_conversations(project_id: str):
+    from research_agent.memory import get_all_turns
+    turns = get_all_turns(project_id)
+    return [{"role": "user" if i % 2 == 0 else "ai", "text": t.user_message if i % 2 == 0 else t.assistant_message,
+             "timestamp": t.timestamp} for i, t in enumerate(turns)]
+
+
 @app.get("/api/graph")
 async def get_graph():
     from research_agent.knowledge_graph import load_graph

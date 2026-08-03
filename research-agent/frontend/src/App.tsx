@@ -114,6 +114,26 @@ export default function App() {
     }
   }, [currentProjectId]);
 
+  // Load conversation history from server on project change
+  useEffect(() => {
+    fetch(`/api/projects/${currentProjectId}/conversations`)
+      .then(r => r.json())
+      .then((turns: any[]) => {
+        if (turns && turns.length > 0) {
+          const msgs = turns.map((t: any, i: number) => ({
+            id: `hist_${i}`, role: t.role, text: t.text,
+            timestamp: Date.now(), projectId: currentProjectId,
+          }));
+          const cid = activeChatIds[currentProjectId] || '__init__';
+          setAllMessages(prev => {
+            const existing = prev[currentProjectId]?.[cid] || [];
+            if (existing.length > 0) return prev; // already has messages
+            return { ...prev, [currentProjectId]: { [cid]: msgs } };
+          });
+        }
+      }).catch(() => {});
+  }, [currentProjectId]);
+
   const messages = (allMessages[currentProjectId]?.[currentChatId]) || [];
   const currentProject = projects.find(p => p.id === currentProjectId);
 
