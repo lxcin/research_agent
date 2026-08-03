@@ -171,11 +171,7 @@ export default function App() {
 
     setMessages(prev => [...prev, { id: generateId(), role: 'user', text, timestamp: Date.now(), projectId: currentProjectId }]);
 
-    if (!apiConfig.apiKey) {
-      setMessages(prev => [...prev, { id: generateId(), role: 'ai', text: '请先配置 API。点击右上角 设置按钮，填入你的 API Key 和模型信息。', timestamp: Date.now(), projectId: currentProjectId }]);
-      return;
-    }
-
+    // Server handles API key validation — sends error if not configured
     setLoading(true);
     const msgId = generateId();
 
