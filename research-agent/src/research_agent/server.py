@@ -76,10 +76,13 @@ async def chat(req: ChatRequest):
     user_config = req.config
 
     if not user_config or not user_config.apiKey:
-        async def gen():
-            yield f"data: {json.dumps({'type': 'error', 'text': '请先配置 API Key'})}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        from research_agent.config import get_api_key as config_api_key
+        if not config_api_key():
+            async def gen():
+                yield f"data: {json.dumps({'type': 'error', 'text': 'Please configure API Key'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return StreamingResponse(gen(), media_type="text/event-stream")
+        # Config has key — proceed
 
     async def gen():
         yield f"data: {json.dumps({'type': 'start', 'id': str(uuid.uuid4())})}\n\n"
@@ -91,33 +94,20 @@ async def chat(req: ChatRequest):
 
         def _run():
             try:
-                os.environ["LLM_API_KEY"] = user_config.apiKey
-                os.environ["DEEPSEEK_API_KEY"] = user_config.apiKey
-                os.environ["OPENAI_API_KEY"] = user_config.apiKey
+                # API key fallback: frontend > env var > config.yml
+                from research_agent.config import get_api_key
+                frontend_key = user_config.apiKey if user_config else ""
+                api_key = frontend_key or get_api_key()
+                if not api_key:
+                    emit("error", {"text": "请先配置 API Key（设置面板 → 填入 Key，或设置环境变量）"})
+                    emit("done", {})
+                    return
 
-                model = user_config.model or "deepseek-chat"
-                if user_config.provider == "deepseek":
-                    if not model.startswith("openai/"):
-                        model = "openai/" + model
-                kwargs = {}
-                if user_config.baseUrl:
-                    kwargs["api_base"] = user_config.baseUrl
+                model = (user_config.model if user_config else "") or "deepseek/deepseek-chat"
+                api_base = (user_config.baseUrl if user_config else "") or None
 
-                class CustomLLM:
-                    def __init__(self):
-                        self.model = model
-                        self.api_key = user_config.apiKey
-                        self._kwargs = kwargs
-                    def complete(self, messages, max_tokens=300, **kw):
-                        import litellm as _llm
-                        resp = _llm.completion(
-                            model=self.model, messages=messages,
-                            max_tokens=max_tokens, temperature=0.7,
-                            api_key=self.api_key, **self._kwargs, **kw,
-                        )
-                        return resp.choices[0].message.content
-
-                llm = CustomLLM()
+                from research_agent.llm import LiteLLMProvider
+                llm = LiteLLMProvider(model=model, api_key=api_key, api_base=api_base)
                 state = AgentState(user_input=req.message)
                 result = run_agent(req.message, llm, state, on_event=emit)
 

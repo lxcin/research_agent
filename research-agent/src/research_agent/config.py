@@ -63,7 +63,16 @@ def get_model_name() -> str:
 
 def get_api_key() -> str | None:
     key_env = get_model_config().get("api_key_env", "ANTHROPIC_API_KEY")
-    return os.environ.get(key_env)
+    # 1. Check env var (highest priority)
+    key = os.environ.get(key_env)
+    if key:
+        return key
+    # 2. Check config file (written by setup or frontend)
+    config_key = get_model_config().get("api_key", "")
+    if config_key and config_key != "__MISSING__":
+        return config_key
+    # 3. Generic fallback
+    return os.environ.get("RESEARCH_AGENT_LLM_KEY")
 
 
 def get_api_base() -> str | None:

@@ -8,18 +8,22 @@ class LLMProvider(ABC):
 
 
 class LiteLLMProvider(LLMProvider):
-    def __init__(self, model: str | None = None):
-        from research_agent.config import get_model_config
+    def __init__(self, model: str | None = None, api_key: str | None = None,
+                 api_base: str | None = None):
+        from research_agent.config import get_model_config, get_api_key
         cfg = get_model_config()
-        self.model = model or cfg.get("name", "claude-3-haiku-20240307")
-        self.api_base = cfg.get("api_base")
+        self.model = model or cfg.get("name", "openai/deepseek-chat")
+        self.api_base = api_base or cfg.get("api_base")
+        self.api_key = api_key or get_api_key()
+        self._kwargs = {}
+        if self.api_base:
+            self._kwargs["api_base"] = self.api_base
 
     def complete(self, messages: list[dict], **kwargs) -> str:
         import litellm
-        call_kwargs = {"model": self.model, "messages": messages}
-        call_kwargs.update(kwargs)
-        if self.api_base:
-            call_kwargs["api_base"] = self.api_base
+        call_kwargs = {"model": self.model, "messages": messages, **self._kwargs, **kwargs}
+        if self.api_key:
+            call_kwargs["api_key"] = self.api_key
         resp = litellm.completion(**call_kwargs)
         return resp.choices[0].message.content
 
