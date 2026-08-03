@@ -425,12 +425,14 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                 if tc["name"] in ("retrieve", "search_papers"):
                     total_search_rounds += 1
 
-                if tc["name"] not in registry:
+                # Check if tool is in the FILTERED list (respects intent routing)
+                tool_names_in_list = [t["function"]["name"] for t in tools_list]
+                if tc["name"] not in tool_names_in_list:
                     total_retries += 1; round_retry += 1; round_has_errors = True
-                    hint = f"工具'{tc['name']}'不存在。可用: {', '.join(registry.tools.keys())}"
+                    hint = f"工具'{tc['name']}'在当前意图下不可用。可用: {', '.join(tool_names_in_list)}"
                     if round_retry >= 2:
                         hint += " 请直接回答，不要调用工具。"
-                    _emit(on_event, "tool", {"tool": tc["name"], "status": "unknown", "hint": hint[:80]})
+                    _emit(on_event, "tool", {"tool": tc["name"], "status": "blocked_by_router", "hint": hint[:80]})
                     messages.append({"role": "tool", "tool_call_id": tc["id"],
                                      "content": json.dumps({"error": hint}, ensure_ascii=False)})
                     continue

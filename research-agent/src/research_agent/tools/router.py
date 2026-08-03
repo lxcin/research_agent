@@ -29,7 +29,7 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
     "execute":  ["运行", "run", "执行", "exec", "shell", "实验", "experiment", "训练", "train"],
     "git":      ["git", "版本", "checkpoint", "回滚", "rollback", "检查点", "提交 commit"],
     "review":   ["综述", "review", "survey", "总结", "概括", "比较", "对比", "系统", "全面", "系统性地", "comprehensive"],
-    "manage":   ["项目", "project", "管理", "设置", "配置", "switch", "切换"],
+    "manage":   ["项目", "project", "管理", "设置", "配置", "switch", "切换", "工作目录", "目录", "路径", "在哪"],
 }
 
 
