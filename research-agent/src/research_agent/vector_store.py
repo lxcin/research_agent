@@ -7,6 +7,7 @@ from research_agent.config import get_data_dir
 _COLLECTIONS: dict[str, chromadb.Collection] = {}
 _EMBEDDING_FN = None
 _EMBEDDING_MODEL = None
+_EMBEDDING_AVAILABLE = None  # None=unknown, True=works, False=degraded
 
 
 def get_embedding_model():
@@ -47,15 +48,34 @@ def get_collection(name: str = "research_chunks") -> chromadb.Collection:
         try:
             _COLLECTIONS[name] = client.get_collection(name=name)
         except Exception:
-            _COLLECTIONS[name] = client.create_collection(
-                name=name,
-                embedding_function=get_embedding_function(),
-            )
+            try:
+                _COLLECTIONS[name] = client.create_collection(
+                    name=name,
+                    embedding_function=get_embedding_function(),
+                )
+            except Exception:
+                _COLLECTIONS[name] = client.create_collection(
+                    name=name,
+                    metadata={"hnsw:space": "cosine"},
+                )
     return _COLLECTIONS[name]
 
 
+def is_embedding_available() -> bool:
+    """Check if ChromaDB vector search is usable. Returns False on degradation."""
+    global _EMBEDDING_AVAILABLE
+    if _EMBEDDING_AVAILABLE is not None:
+        return _EMBEDDING_AVAILABLE
+    try:
+        coll = get_collection()
+        coll.count()
+        _EMBEDDING_AVAILABLE = True
+    except Exception:
+        _EMBEDDING_AVAILABLE = False
+    return _EMBEDDING_AVAILABLE
+
+
 def add_chunks(paper_id: str, chunks: list[dict], collection_name: str = "research_chunks"):
-    coll = get_collection(collection_name)
     ids = [f"{paper_id}_chunk_{c['chunk_index']}" for c in chunks]
     documents = [c["text"] for c in chunks]
     metadatas = [{"paper_id": paper_id, "chunk_index": c["chunk_index"]} for c in chunks]

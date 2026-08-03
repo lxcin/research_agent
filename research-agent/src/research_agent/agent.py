@@ -15,12 +15,31 @@ from research_agent.store import init_db, get_all_projects, insert_project, upda
 from research_agent.router import route_to_project, extract_project_topic
 from research_agent.validate import validate_response
 from research_agent.config import get_temperature, get_max_output_tokens
+from research_agent.trace_log import set_trace_id, logger
 
 MAX_ROUNDS = 5
 MAX_TOTAL_RETRIES = 5
 MAX_SEARCH_CALLS = 2  # max search_papers calls per run — force read after
+LLM_RETRY_BACKOFF = [1, 2, 4]  # seconds between retries
 
 EventCallback = Callable[[str, dict], None]
+
+
+def _call_llm_with_retry(llm_func, emit, max_retries=3) -> dict | str:
+    """Call LLM with exponential backoff retry. Raises on final failure."""
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return llm_func()
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                delay = LLM_RETRY_BACKOFF[min(attempt, len(LLM_RETRY_BACKOFF) - 1)]
+                _emit(emit, "tool", {"tool": "llm", "status": "retry",
+                       "attempt": attempt + 1, "delay": delay, "error": str(e)[:80]})
+                import time
+                time.sleep(delay)
+    raise last_error
 
 
 def _emit(event: EventCallback | None, event_type: str, data: dict):
@@ -202,7 +221,14 @@ def _call_llm_with_tools(llm: LLMProvider, messages: list[dict],
 
 
 def _stream_response(llm: LLMProvider, messages: list[dict], emit: EventCallback):
-    """Stream LLM response token-by-token, emitting chunk events."""
+    """Stream LLM response token-by-token with retry."""
+    return _call_llm_with_retry(
+        lambda: _stream_response_once(llm, messages, emit),
+        emit,
+    )
+
+
+def _stream_response_once(llm: LLMProvider, messages: list[dict], emit: EventCallback):
     import litellm
     model = getattr(llm, "model", "openai/deepseek-chat")
     kwargs = getattr(llm, "_kwargs", {})
@@ -224,6 +250,8 @@ def _stream_response(llm: LLMProvider, messages: list[dict], emit: EventCallback
 
 def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
               on_event: EventCallback = None) -> AgentState:
+    set_trace_id()
+    logger.info(f"run_agent START: {user_input[:80]}")
     from research_agent.tools import get_registry
     from research_agent.tools.builtin import register_builtins
     from research_agent.skill import load_and_register_skills
@@ -359,7 +387,10 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
         _emit(on_event, "step", {"step": "thinking", "round": round_num, "text": "思考下一步..."})
 
         try:
-            response = _call_llm_with_tools(llm, messages, tools_list, "auto")
+            response = _call_llm_with_retry(
+                lambda: _call_llm_with_tools(llm, messages, tools_list, "auto"),
+                on_event,
+            )
         except Exception as e:
             total_retries += 1
             _emit(on_event, "tool", {"tool": "llm", "status": "error", "error": str(e), "retries": total_retries})
@@ -410,6 +441,16 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                     _emit(on_event, "tool", {"tool": tc["name"], "status": "blocked", "hint": hint})
                     messages.append({"role": "tool", "tool_call_id": tc["id"],
                                      "content": json.dumps({"error": hint}, ensure_ascii=False)})
+                    continue
+
+                # Validate tool params before dispatch
+                from research_agent.tools.validate_params import validate_tool_params
+                param_err = validate_tool_params(tc["name"], tc["params"])
+                if param_err:
+                    total_retries += 1; round_retry += 1; round_has_errors = True
+                    _emit(on_event, "tool", {"tool": tc["name"], "status": "invalid_params", "error": param_err})
+                    messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                     "content": json.dumps({"error": param_err}, ensure_ascii=False)})
                     continue
 
                 result = registry.dispatch(tc["name"], tc["params"], llm, state, on_event)

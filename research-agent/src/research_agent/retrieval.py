@@ -47,7 +47,10 @@ def _get_bm25() -> tuple[BM25Okapi | None, list[dict]]:
 def build_bm25_index():
     """Force rebuild BM25 index (call after adding/deleting chunks)."""
     _get_bm25.cache_clear()
-    _get_bm25()
+    try:
+        _get_bm25()
+    except Exception:
+        pass  # ChromaDB unavailable, BM25 will be empty
 
 
 def _reciprocal_rank_fusion(vector_results: list[dict], bm25_results: list[dict], k: int = 60) -> list[dict]:
@@ -99,9 +102,24 @@ def _bm25_search(query: str, n_results: int) -> list[dict]:
 
 
 def hybrid_search(query: str, n_results: int = 5, project_id: str | None = None) -> list[dict]:
-    vector_results = _vector_search(query, n_results * 3)
+    from research_agent.vector_store import is_embedding_available
+
+    # Vector search only if embedding is available
+    vector_results = []
+    if is_embedding_available():
+        try:
+            vector_results = _vector_search(query, n_results * 3)
+        except Exception:
+            pass
+
     bm25_results = _bm25_search(query, n_results * 3)
-    fused = _reciprocal_rank_fusion(vector_results, bm25_results)
+
+    if vector_results:
+        fused = _reciprocal_rank_fusion(vector_results, bm25_results)
+    else:
+        # BM25-only mode: no ChromaDB embedding available
+        fused = bm25_results
+
     results = fused[:n_results]
 
     # Filter by project if specified

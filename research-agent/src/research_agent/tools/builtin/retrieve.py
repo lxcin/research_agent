@@ -240,6 +240,8 @@ def _handle_read_paper(params: dict, llm, state, emit) -> ToolResult:
 
 def _build_read_result(pid: str, text: str, state, source: str = "") -> ToolResult:
     """Build read_paper ToolResult with metadata lookup."""
+    if not text:
+        text = "(empty)"
     words = text.split()
     truncated = " ".join(words[:4000]) if len(words) > 4000 else text
 
