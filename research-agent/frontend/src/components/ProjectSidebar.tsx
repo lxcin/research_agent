@@ -8,14 +8,13 @@ interface ProjectSidebarProps {
     currentProjectId: string;
     onSelectProject: (id: string) => void;
     onNewProject: () => void;
-    onRenameProject: (id: string, name: string) => void;
     onDeleteProject: (id: string) => void;
     onSetWorkspace: (id: string, dir: string) => void;
 }
 
 export default function ProjectSidebar({
     isOpen, onToggle, projects, currentProjectId,
-    onSelectProject, onNewProject, onRenameProject, onDeleteProject, onSetWorkspace,
+    onSelectProject, onNewProject, onDeleteProject, onSetWorkspace,
 }: ProjectSidebarProps) {
     const [search, setSearch] = useState('');
     const [wsDir, setWsDir] = useState('');

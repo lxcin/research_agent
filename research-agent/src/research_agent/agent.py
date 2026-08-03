@@ -470,6 +470,20 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                                      "content": json.dumps({"error": hint}, ensure_ascii=False)})
                     continue
 
+                # Also catch shell_exec returning success=False in data
+                if tc["name"] == "shell_exec" and result.data.get("success") is False:
+                    stderr = result.data.get("stderr", "")
+                    stdout = result.data.get("stdout", "")[:300]
+                    err = stderr or result.data.get("returncode", "")
+                    if stderr:
+                        hint = f"Command failed (exit {result.data.get('returncode', '?')}): {stderr.strip()[:200]}"
+                    else:
+                        hint = f"Command failed with exit code {result.data.get('returncode', '?')}"
+                    _emit(on_event, "tool", {"tool": tc["name"], "status": "error", "error": hint[:100]})
+                    messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                     "content": json.dumps({"error": hint, "stdout": stdout}, ensure_ascii=False)})
+                    continue
+
                 # Success
                 messages.append({"role": "tool", "tool_call_id": tc["id"],
                                  "content": json.dumps(result.data, ensure_ascii=False)})

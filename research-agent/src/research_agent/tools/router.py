@@ -16,15 +16,16 @@ INTENT_ROUTES: dict[str, list[str]] = {
     "review":       ["retrieve", "search_papers", "read_paper", "update_notes",
                      "file_write", "file_edit", "file_read"],
     "manage":       ["shell_exec", "check_tasks", "file_write", "file_edit"],
-    "default":      [],  # all tools via fallback
+    "default":      ["retrieve", "search_papers", "read_paper"],  # no filesystem/shell
 }
 
 # Keywords in user input that trigger each intent
 INTENT_KEYWORDS: dict[str, list[str]] = {
-    "retrieve": ["检索", "retrieve", "查找", "找", "有什么", "有没有", "哪些", "find paper", "find articles"],
+    "retrieve": ["检索", "retrieve", "查找", "找", "有什么", "有没有", "哪些", "find paper", "find articles",
+                 "文件在哪", "文件位置", "在哪里", "搜一下", "查一下"],
     "read":     ["读", "read", "看内容", "内容是什么", "讲什么", "讲了什么", "说了什么"],
     "search":   ["搜索 arxiv", "search arxiv", "arxiv", "搜论文", "search for paper"],
-    "write":    ["写", "write", "保存", "save", "创建文件", "create file", "记录", "做笔记"],
+    "write":    ["写", "write", "保存", "save", "创建文件", "create file", "记录", "做笔记", "帮我写"],
     "execute":  ["运行", "run", "执行", "exec", "shell", "实验", "experiment", "训练", "train"],
     "git":      ["git", "版本", "checkpoint", "回滚", "rollback", "检查点", "提交 commit"],
     "review":   ["综述", "review", "survey", "总结", "概括", "比较", "对比", "系统", "全面", "系统性地", "comprehensive"],

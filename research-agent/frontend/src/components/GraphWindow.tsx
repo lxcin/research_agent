@@ -1,5 +1,4 @@
 import { useRef, useEffect, useCallback } from 'react';
-import type { WindowType } from '../types';
 
 interface GraphWindowProps {
   isOpen: boolean;

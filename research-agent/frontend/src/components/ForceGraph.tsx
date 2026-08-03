@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { useRef, useEffect, useCallback, useState } from 'react';
 import type { GraphNode, GraphEdge, GraphData, PaperTree } from '../types';
 

@@ -32,8 +32,8 @@ export default function ChatInput({ onSend, disabled }: ChatInputProps) {
     if (el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px'; }
   }, []);
 
-  const handleUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handleUpload = useCallback(async (_e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = _e.target.files?.[0];
     if (!file) return;
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
     if (!['pdf', 'md', 'txt'].includes(ext)) return;
@@ -52,7 +52,7 @@ export default function ChatInput({ onSend, disabled }: ChatInputProps) {
     }
   }, [onSend]);
 
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+  const handlePaste = useCallback((_e: React.ClipboardEvent) => {
     // Support paste PDF from clipboard in future
   }, []);
 

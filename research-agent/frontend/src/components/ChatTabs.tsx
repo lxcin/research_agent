@@ -1,5 +1,3 @@
-import { useCallback } from 'react';
-
 interface ChatTabsProps {
     chats: { id: string; title: string }[];
     activeId: string;

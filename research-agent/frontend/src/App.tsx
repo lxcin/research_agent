@@ -14,7 +14,7 @@ import SkillsPanel from './components/SkillsPanel';
 import ChatTabs from './components/ChatTabs';
 import ErrorBoundary from './components/ErrorBoundary';
 import type { PlanItem } from './components/PlanPanel';
-import type { Message, GraphData, PaperTree, Project, ApiConfig, ToolCall } from './types';
+import type { Message, GraphData, PaperTree, Project, ApiConfig } from './types';
 
 const EMPTY_GRAPH: GraphData = { nodes: [], edges: [] };
 const EMPTY_TREES: Record<string, PaperTree> = {};
@@ -268,7 +268,7 @@ export default function App() {
 
 const handleSelectProject = useCallback((id: string) => {
     setCurrentProjectId(id);
-    setProjectOpen(false);
+    setSidebarOpen(false);
   }, []);
 
   const handleNewChat = useCallback(() => {
@@ -317,7 +317,7 @@ const handleSelectProject = useCallback((id: string) => {
       .then(newProj => {
         setProjects(prev => [{ ...newProj, steps: [], progress: 0 }, ...prev]);
         setCurrentProjectId(newProj.id);
-        setProjectOpen(false);
+        setSidebarOpen(false);
       })
       .catch(() => {
         // Fallback: use timestamp-based ID
@@ -460,7 +460,6 @@ const handleSelectProject = useCallback((id: string) => {
         currentProjectId={currentProjectId}
         onSelectProject={handleSelectProject}
         onNewProject={handleNewProject}
-        onRenameProject={handleRenameProject}
         onDeleteProject={handleDeleteProject}
         onSetWorkspace={handleSetWorkspace}
       />

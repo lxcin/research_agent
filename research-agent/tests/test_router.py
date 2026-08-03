@@ -82,11 +82,11 @@ class TestToolRouting:
         assert len(tool_names) == 1  # only shell_exec needed
 
     def test_default_exposes_all(self):
-        """Default intent should expose most tools."""
+        """Default intent exposes basic research tools (no filesystem/shell)."""
         registry = get_registry()
         filtered = route_tools("default", registry)
-        full_count = len(registry.list_for_llm())
-        assert len(filtered) >= full_count - 1  # default includes all + subagent
+        # Default should expose at least retrieve, search_papers, read_paper
+        assert len(filtered) >= 3
 
     def test_all_intents_work(self):
         """Every intent label produces a non-empty tool list."""
