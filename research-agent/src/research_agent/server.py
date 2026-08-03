@@ -196,15 +196,20 @@ async def get_project(project_id: str):
 
 @app.post("/api/projects")
 async def create_project(req: ProjectCreate):
+    from research_agent.store import insert_project
+    from research_agent.models import Project, ProjectStatus, AccumulatedWisdom
+    p = Project(
+        topic=req.name, status=ProjectStatus.ACTIVE,
+        created_at=datetime.now().isoformat(), updated_at=datetime.now().isoformat(),
+        accumulated_wisdom=AccumulatedWisdom(),
+    )
+    pid = insert_project(p)
+    p.id = pid
+    # Keep in-memory list for frontend compatibility
     proj = {
-        "id": str(uuid.uuid4())[:8],
-        "name": req.name,
-        "status": "active",
-        "updated": "刚刚",
-        "created": datetime.now().strftime("%Y-%m-%d"),
-        "summary": "",
-        "progress": 0,
-        "steps": [],
+        "id": pid, "name": req.name, "status": "active",
+        "updated": "刚刚", "created": datetime.now().strftime("%Y-%m-%d"),
+        "summary": "", "progress": 0, "steps": [],
     }
     _projects.insert(0, proj)
     return proj
