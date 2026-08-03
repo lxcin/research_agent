@@ -8,7 +8,7 @@ _logger = logging.getLogger("research_agent")
 _logger.setLevel(logging.INFO)
 if not _logger.handlers:
     h = logging.StreamHandler()
-    h.setFormatter(logging.Formatter("%(asctime)s [%(trace_id)s] %(levelname)s %(message)s"))
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     _logger.addHandler(h)
 
 _trace_local = threading.local()
