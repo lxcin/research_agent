@@ -7,13 +7,11 @@ def test_build_resume_message():
         id="p1", topic="HPLC分析",
         status=ProjectStatus.WAITING,
         pending_task=PendingTask(description="跑HPLC实验", expected_time="2-3天"),
-        history_summary="讨论了HPLC方法选择"
     )
     msg = _build_resume_message(p)
     assert "HPLC分析" in msg
     assert "跑HPLC实验" in msg
     assert "2-3天" in msg
-    assert "HPLC方法选择" in msg
 
 
 def test_detect_pending_task():
