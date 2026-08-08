@@ -119,7 +119,3 @@ def get_paper_metadata(identifier: str, id_type: str = "arxiv") -> dict | None:
         return None
     return _parse_arxiv_entry(entries[0])
 
-
-def _keep_search_papers():
-    """Backward compatibility: Semantic Scholar search still available."""
-    pass

@@ -1,6 +1,10 @@
+import { useState, useEffect } from 'react';
+
 interface TopBarProps {
-  projectName: string;
-  onProjectNameChange: (name: string) => void;
+  chatTitle: string;
+  onChatTitleChange: (title: string) => void;
+  onNewChat: () => void;
+  workspacePath: string;
   graphOpen: boolean;
   projectOpen: boolean;
   onGraphToggle: () => void;
@@ -16,11 +20,24 @@ interface TopBarProps {
   onClearMessages: () => void;
 }
 
+function displayPath(dir: string): string {
+  if (!dir) return '默认';
+  const parts = dir.replace(/\\/g, '/').split('/').filter(Boolean);
+  if (parts.length <= 2) return dir;
+  return '.../' + parts.slice(-2).join('/');
+}
+
 export default function TopBar({
-  projectName, onProjectNameChange, graphOpen, projectOpen,
-  onGraphToggle, onProjectToggle, onPapersToggle, onToolsToggle, onWorkspaceToggle, theme, onThemeToggle, onSettingsOpen, hasApiConfig,
+  chatTitle, onChatTitleChange, onNewChat, workspacePath,
+  graphOpen, projectOpen,
+  onGraphToggle, onProjectToggle, onPapersToggle, onToolsToggle,
+  onWorkspaceToggle, theme, onThemeToggle, onSettingsOpen, hasApiConfig,
   hasMessages, onClearMessages,
 }: TopBarProps) {
+  const [editTitle, setEditTitle] = useState(chatTitle);
+
+  useEffect(() => { setEditTitle(chatTitle); }, [chatTitle]);
+
   return (
     <header className="topbar">
       <div className="topbar-title">
@@ -29,20 +46,29 @@ export default function TopBar({
             <path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h12"/>
           </svg>
         </button>
-        <input
-          className="project-name"
-          value={projectName}
-          spellCheck={false}
-          onChange={e => onProjectNameChange(e.target.value)}
-          onBlur={() => { if (!projectName.trim()) onProjectNameChange('未命名项目'); }}
-          onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-        />
+        <button className="topbar-new-chat-btn" onClick={onNewChat} title="新建对话">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M12 5v14"/><path d="M5 12h14"/>
+          </svg>
+        </button>
+        <div className="topbar-chat-info">
+          <input
+            className="project-name"
+            value={editTitle}
+            placeholder="对话标题..."
+            spellCheck={false}
+            onChange={e => setEditTitle(e.target.value)}
+            onBlur={() => { if (editTitle !== chatTitle) onChatTitleChange(editTitle); }}
+            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+          />
+          <span className="topbar-ws-path">{displayPath(workspacePath)}</span>
+        </div>
       </div>
       <div className="topbar-actions">
         <button className={`icon-btn${graphOpen ? ' active' : ''}`} onClick={onGraphToggle} title="知识图谱">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M12 7.5v3"/><path d="M7.5 17.5l3-4"/><path d="M16.5 17.5l-3-4"/></svg>
         </button>
-        <button className={`icon-btn${projectOpen ? ' active' : ''}`} onClick={onProjectToggle} title="项目面板">
+        <button className={`icon-btn${projectOpen ? ' active' : ''}`} onClick={onProjectToggle} title="工作区面板">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
         </button>
         <button className="icon-btn" onClick={onPapersToggle} title="论文库">

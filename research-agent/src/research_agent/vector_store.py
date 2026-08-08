@@ -80,6 +80,7 @@ def add_chunks(paper_id: str, chunks: list[dict], collection_name: str = "resear
     documents = [c["text"] for c in chunks]
     metadatas = [{"paper_id": paper_id, "chunk_index": c["chunk_index"]} for c in chunks]
     if ids:
+        coll = get_collection(collection_name)
         coll.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
 

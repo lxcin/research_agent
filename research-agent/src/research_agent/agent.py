@@ -1,18 +1,17 @@
 """Self-implemented agent loop with function calling + tool registry."""
 import json
+import os
 import re
-import threading
 from datetime import datetime
 from typing import Callable
 
-from research_agent.models import AgentState, Action, Project, ProjectStatus, ConversationTurn, PendingTask
+from research_agent.models import AgentState, Project, ProjectStatus, ConversationTurn, PendingTask
 from research_agent.llm import LLMProvider
 from research_agent.context import build_context
-from research_agent.guardrail import guardrail
 from research_agent.retrieval import hybrid_search, build_bm25_index
 from research_agent.memory import store_turn, get_recent_turns, count_uncompressed_turns, mark_compressed
-from research_agent.store import init_db, get_all_projects, insert_project, update_project
-from research_agent.router import route_to_project, extract_project_topic
+from research_agent.store import init_db
+from research_agent.router import extract_project_topic
 from research_agent.validate import validate_response
 from research_agent.config import get_temperature, get_max_output_tokens
 from research_agent.trace_log import set_trace_id, logger
@@ -35,8 +34,7 @@ def _call_llm_with_retry(llm_func, emit, max_retries=3) -> dict | str:
             last_error = e
             if attempt < max_retries:
                 delay = LLM_RETRY_BACKOFF[min(attempt, len(LLM_RETRY_BACKOFF) - 1)]
-                _emit(emit, "tool", {"tool": "llm", "status": "retry",
-                       "attempt": attempt + 1, "delay": delay, "error": str(e)[:80]})
+                _emit(emit, "thinking", {"text": f"LLM 重试 {attempt+1}/{max_retries}: {str(e)[:80]}"})
                 import time
                 time.sleep(delay)
     raise last_error
@@ -47,14 +45,13 @@ def _emit(event: EventCallback | None, event_type: str, data: dict):
         event(event_type, data)
 
 
+# Used in tests
 def _build_resume_message(project: Project) -> str:
     parts = [f"欢迎回来！项目「{project.topic}」之前处于等待状态。"]
     if project.pending_task:
         parts.append(f"等待事项: {project.pending_task.description}")
         if project.pending_task.expected_time:
             parts.append(f"预期时间: {project.pending_task.expected_time}")
-    if project.history_summary:
-        parts.append(f"项目摘要: {project.history_summary}")
     return "\n".join(parts)
 
 
@@ -79,9 +76,6 @@ def _deduplicate_results(results: list[dict]) -> list[dict]:
             seen[pid] = r
     return list(seen.values())
 
-
-def _clean_context(messages: list[dict]) -> list[dict]:
-    return [m for m in messages if m["role"] in ("system", "user", "tool")]
 
 
 def _generate_msgs(messages: list[dict], state) -> list[dict]:
@@ -193,7 +187,6 @@ JSON："""
     })
 
 
-
 def _call_llm_with_tools(llm: LLMProvider, messages: list[dict],
                          tools: list[dict], tool_choice: str = "auto") -> dict:
     """Call LLM with function calling support. Returns {content, tool_calls}."""
@@ -244,19 +237,22 @@ def _stream_response_once(llm: LLMProvider, messages: list[dict], emit: EventCal
         delta = chunk.choices[0].delta
         if delta.content:
             content += delta.content
-            _emit(emit, "chunk", {"text": delta.content})
+            _emit(emit, "reply", {"text": delta.content})
     return content
 
 
 def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
-              on_event: EventCallback = None) -> AgentState:
+              on_event: EventCallback = None,
+              workspace_dir: str = "", chat_id: str = "") -> AgentState:
     set_trace_id()
     logger.info(f"run_agent START: {user_input[:80]}")
     from research_agent.tools import get_registry
     from research_agent.tools.builtin import register_builtins
-    from research_agent.skill import load_and_register_skills
     register_builtins()
-    load_and_register_skills()
+
+    state.workspace_dir = workspace_dir
+    state.active_chat_id = chat_id
+    state.sections = []  # track structured sections for persistence
 
     # Auto-load MCP servers from config
     import os as _os
@@ -273,9 +269,9 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             results = manager.start_all()
             for key, names in results.items():
                 if names:
-                    _emit(on_event, "step", {"step": "mcp_loaded", "text": f"MCP: {len(names)} tools from {key}"})
+                    _emit(on_event, "thinking", {"text": f"MCP: {len(names)} tools from {key}"})
                 elif key in results:
-                    _emit(on_event, "step", {"step": "mcp_failed", "text": f"MCP: {key} failed"})
+                    _emit(on_event, "thinking", {"text": f"MCP: {key} failed"})
     except Exception:
         pass
 
@@ -284,26 +280,10 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     state.user_input = user_input
     init_db()
 
-    _emit(on_event, "step", {"step": "init", "text": "分析用户意图..."})
-
-    # Emit a plan for complex tasks
-    if len(user_input) > 10 and any(kw in user_input for kw in ["综述", "review", "总结", "比较", "设计", "实现", "复现", "报告"]):
-        _emit(on_event, "plan", {"items": [
-            "🔍 检索本地知识库",
-            "📡 搜索 arXiv 补充论文",
-            "📊 分析比较各方观点",
-            "✍️ 生成结构化回答",
-        ]})
-
-    # ── Project routing ──
-    if not state.active_project:
-        projects = get_all_projects()
-        if projects:
-            matched = route_to_project(user_input, projects)
-            if matched:
-                state.active_project = matched
-                _emit(on_event, "step", {"step": "route", "text": f"路由到项目: {matched.topic}"})
-        if not state.active_project:
+    # ── Project init / load ──
+    from research_agent import project_manager as pm
+    if workspace_dir:
+        if not pm.is_project_dir(workspace_dir):
             topic = extract_project_topic(user_input)
             if len(topic) > 20:
                 try:
@@ -314,41 +294,49 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                     topic = resp.strip()
                 except Exception:
                     topic = topic[:40]
-            state.active_project = Project(
-                topic=topic, status=ProjectStatus.ACTIVE,
-                created_at=datetime.now().isoformat(), updated_at=datetime.now().isoformat(),
-            )
-            pid = insert_project(state.active_project)
-            state.active_project.id = pid
-            # Create workspace directory for this project
-            from research_agent.tools.builtin.filesystem import _get_project_dir
-            ws_dir = _get_project_dir(state)
-            import os
-            os.makedirs(os.path.join(ws_dir, "papers"), exist_ok=True)
-            os.makedirs(os.path.join(ws_dir, "experiments"), exist_ok=True)
-            # Initialize git repo in workspace
+            proj = pm.init_project(workspace_dir, topic)
+            os.makedirs(os.path.join(workspace_dir, "papers"), exist_ok=True)
+            os.makedirs(os.path.join(workspace_dir, "experiments"), exist_ok=True)
             try:
                 from research_agent.tools.git_tool import git_init
-                git_init(ws_dir)
+                git_init(workspace_dir)
             except Exception:
                 pass
-            _emit(on_event, "step", {"step": "project_created", "text": f"创建项目: {topic}\n工作区: {ws_dir}"})
+        else:
+            proj = pm.load_project(workspace_dir)
+    else:
+        # No workspace selected — use a default temp workspace so file tools work
+        from research_agent.config import get_data_dir
+        workspace_dir = str(get_data_dir() / "workspaces" / "default")
+        if not pm.is_project_dir(workspace_dir):
+            topic = extract_project_topic(user_input)
+            if len(topic) > 20:
+                try:
+                    resp = llm.complete(
+                        [{"role": "user", "content": f"Extract a concise project topic (max 5 words) from: {topic}\nOutput ONLY the topic name."}],
+                        max_tokens=30,
+                    )
+                    topic = resp.strip()
+                except Exception:
+                    topic = topic[:40]
+            proj = pm.init_project(workspace_dir, topic)
+        else:
+            proj = pm.load_project(workspace_dir)
+        os.makedirs(os.path.join(workspace_dir, "papers"), exist_ok=True)
+        os.makedirs(os.path.join(workspace_dir, "experiments"), exist_ok=True)
 
-    if state.active_project and state.active_project.status == ProjectStatus.WAITING:
-        resume_msg = _build_resume_message(state.active_project)
-        state.user_input = resume_msg + "\n用户: " + user_input
-        state.active_project.status = ProjectStatus.ACTIVE
-        update_project(state.active_project)
+    state.active_project = Project(
+        id=pm.get_project_id(workspace_dir) if workspace_dir else "",
+        topic=(proj or {}).get("topic", "默认项目"),
+        status=ProjectStatus.ACTIVE,
+        workspace_dir=workspace_dir,
+        created_at=(proj or {}).get("created_at", datetime.now().isoformat()),
+        updated_at=datetime.now().isoformat(),
+    )
 
-    project_id = state.active_project.id if state.active_project else "default"
-    state.conversation_turns = get_recent_turns(project_id, limit=20)
+    state.conversation_turns = get_recent_turns(workspace_dir, chat_id, limit=20)
 
-    # ── Intent routing: reduce tool list to relevant subset ──
-    from research_agent.tools.router import categorize_intent, route_tools, build_routing_report
-    intent = categorize_intent(user_input)
-    tools_list = route_tools(intent, registry)
-    routing_note = build_routing_report(intent, registry)
-    _emit(on_event, "step", {"step": "route_tools", "text": routing_note})
+    tools_list = registry.list_for_llm()
 
     # ── Agent loop with function calling ──
     consecutive_empty = 0
@@ -359,8 +347,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
 
     model_name = getattr(llm, "model", "")
     messages = build_context(state, registry, model_name)
-    # Inject routing info as first system message
-    messages.insert(1, {"role": "system", "content": routing_note})
+    messages.insert(1, {"role": "system", "content": registry.generate_capabilities()})
 
     for round_num in range(1, MAX_ROUNDS + 1):
         state.round_count = round_num
@@ -370,21 +357,18 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             tools_list = [t for t in tools_list if t["function"]["name"] != "retrieve"]
 
         if total_search_rounds >= 3 and consecutive_empty >= 2:
-            _emit(on_event, "step", {"step": "giving_up", "text": "已尝试多次搜索无果，直接回答..."})
+            _emit(on_event, "thinking", {"text": "已尝试多次搜索无果，直接回答..."})
             state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)
             break
         if total_search_rounds >= MAX_SEARCH_CALLS:
-            _emit(on_event, "tool", {"tool": "hint", "status": "search_limit",
-                   "hint": f"检索次数已达上限({MAX_SEARCH_CALLS})，选最好的论文用 read_paper 读，或直接基于当前结果回答"})
+            _emit(on_event, "thinking", {"text": f"检索次数已达上限({MAX_SEARCH_CALLS})，选最好的论文用 read_paper 读，或直接基于当前结果回答"})
             messages.append({"role": "system",
                 "content": f"检索次数已达上限({MAX_SEARCH_CALLS}次)。请从已有结果中选出最相关的论文用 read_paper 阅读，或直接基于当前检索结果回答。不要再调用 search_papers。"})
             # Don't reset counter — keep blocking subsequent calls
         if total_retries >= MAX_TOTAL_RETRIES:
-            _emit(on_event, "step", {"step": "giving_up", "text": "重试次数已达上限"})
+            _emit(on_event, "thinking", {"text": "重试次数已达上限"})
             state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)
             break
-
-        _emit(on_event, "step", {"step": "thinking", "round": round_num, "text": "思考下一步..."})
 
         try:
             response = _call_llm_with_retry(
@@ -393,7 +377,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             )
         except Exception as e:
             total_retries += 1
-            _emit(on_event, "tool", {"tool": "llm", "status": "error", "error": str(e), "retries": total_retries})
+            _emit(on_event, "thinking", {"text": f"模型调用失败 (尝试 {total_retries}/{MAX_TOTAL_RETRIES}): {str(e)[:100]}"})
             messages.append({"role": "system", "content": f"模型调用失败: {e}。请调整参数重试。"})
             if total_retries >= MAX_TOTAL_RETRIES:
                 state.final_response = f"抱歉，模型多次调用失败。"
@@ -417,30 +401,20 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             round_retry = 0
             round_has_errors = False
             for tc in tool_calls:
-                _emit(on_event, "action", {
-                    "action": tc["name"], "query": json.dumps(tc["params"], ensure_ascii=False)[:100],
-                    "reasoning": "", "round": round_num,
-                })
+                tc_id = tc["id"]
+                tc_name = tc["name"]
+                tc_input = tc["params"]
+
+                _emit(on_event, "tool_start", {"id": tc_id, "name": tc_name, "input": tc_input})
+                state._current_tool_id = tc_id
 
                 if tc["name"] in ("retrieve", "search_papers"):
                     total_search_rounds += 1
 
-                # Check if tool is in the FILTERED list (respects intent routing)
-                tool_names_in_list = [t["function"]["name"] for t in tools_list]
-                if tc["name"] not in tool_names_in_list:
-                    total_retries += 1; round_retry += 1; round_has_errors = True
-                    hint = f"工具'{tc['name']}'在当前意图下不可用。可用: {', '.join(tool_names_in_list)}"
-                    if round_retry >= 2:
-                        hint += " 请直接回答，不要调用工具。"
-                    _emit(on_event, "tool", {"tool": tc["name"], "status": "blocked_by_router", "hint": hint[:80]})
-                    messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                     "content": json.dumps({"error": hint}, ensure_ascii=False)})
-                    continue
-
                 # Block search_papers after limit
                 if tc["name"] == "search_papers" and total_search_rounds >= MAX_SEARCH_CALLS:
                     hint = f"搜索次数已达上限({MAX_SEARCH_CALLS})。请用 read_paper 或直接基于已有结果回答。"
-                    _emit(on_event, "tool", {"tool": tc["name"], "status": "blocked", "hint": hint})
+                    _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": hint}})
                     messages.append({"role": "tool", "tool_call_id": tc["id"],
                                      "content": json.dumps({"error": hint}, ensure_ascii=False)})
                     continue
@@ -450,7 +424,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                 param_err = validate_tool_params(tc["name"], tc["params"])
                 if param_err:
                     total_retries += 1; round_retry += 1; round_has_errors = True
-                    _emit(on_event, "tool", {"tool": tc["name"], "status": "invalid_params", "error": param_err})
+                    _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": param_err}})
                     messages.append({"role": "tool", "tool_call_id": tc["id"],
                                      "content": json.dumps({"error": param_err}, ensure_ascii=False)})
                     continue
@@ -467,7 +441,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                     hint = f"工具'{tc['name']}'失败: {err_detail}"
                     if round_retry >= 2:
                         hint += " 请换其他方式回答。"
-                    _emit(on_event, "tool", {"tool": tc["name"], "status": "error", "error": result.data["error"]})
+                    _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": result.data["error"]}})
                     messages.append({"role": "tool", "tool_call_id": tc["id"],
                                      "content": json.dumps({"error": hint}, ensure_ascii=False)})
                     continue
@@ -481,12 +455,13 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                         hint = f"Command failed (exit {result.data.get('returncode', '?')}): {stderr.strip()[:200]}"
                     else:
                         hint = f"Command failed with exit code {result.data.get('returncode', '?')}"
-                    _emit(on_event, "tool", {"tool": tc["name"], "status": "error", "error": hint[:100]})
+                    _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": hint[:100]}})
                     messages.append({"role": "tool", "tool_call_id": tc["id"],
                                      "content": json.dumps({"error": hint, "stdout": stdout}, ensure_ascii=False)})
                     continue
 
                 # Success
+                _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "success", "output": result.data})
                 messages.append({"role": "tool", "tool_call_id": tc["id"],
                                  "content": json.dumps(result.data, ensure_ascii=False)})
 
@@ -509,17 +484,16 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                                 pass
                 elif tc["name"] in ("retrieve", "search_papers") and not result.success:
                     consecutive_empty += 1
-                    _emit(on_event, "tool", {"tool": tc["name"], "status": "empty", "consecutive": consecutive_empty})
+                    _emit(on_event, "thinking", {"text": f"{tc['name']} 返回空结果 (连续 {consecutive_empty} 次)"})
                     if tc["name"] == "retrieve":
                         consecutive_retrieve_few += 1
 
             if consecutive_empty >= 3:
-                _emit(on_event, "step", {"step": "giving_up", "text": "连续搜索无果"})
+                _emit(on_event, "thinking", {"text": "连续搜索无果，直接回答..."})
                 state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)
                 break
             if consecutive_retrieve_few >= 2:
-                _emit(on_event, "tool", {"tool": "hint", "status": "escalate",
-                       "hint": "本地结果不足，建议使用 search_papers"})
+                _emit(on_event, "thinking", {"text": "本地结果不足，建议使用 search_papers"})
                 messages.append({"role": "system", "content": "本地检索结果较少（<3条），建议使用 search_papers 搜索 arXiv 获取更多论文。"})
                 consecutive_retrieve_few = 0
             # Auto-checkpoint after successful rounds with file/shell operations
@@ -530,13 +504,11 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                     ws = _get_project_dir(state)
                     if ws and os.path.isdir(os.path.join(ws, ".git")) and should_auto_checkpoint(round_action_names, round_has_errors):
                         git_checkpoint(ws, f"round_{round_num}: auto checkpoint")
-                        _emit(on_event, "step", {"step": "checkpoint", "text": f"自动检查点: round_{round_num}"})
             except Exception:
                 pass
             continue
 
         # ── No tool calls → text response ──
-        _emit(on_event, "step", {"step": "generate", "text": "生成回答..."})
         # Strip tool messages for final response — DeepSeek requires strict ordering
         clean_msgs = [m for m in messages if m["role"] in ("system", "user")]
         clean_msgs.append({"role": "system",
@@ -551,21 +523,22 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
 
     # ── Stream final response ──
     state = validate_response(state)
-    _save_turn(state, project_id)
-    _maybe_compress(project_id, llm)
+    _save_turn(state, workspace_dir, chat_id)
+    _maybe_compress(workspace_dir, chat_id, llm)
     _mark_waiting_if_needed(state)
     return state
 
 
-def _save_turn(state: AgentState, project_id: str):
+def _save_turn(state: AgentState, workspace_dir: str, chat_id: str):
     round_num = len(state.conversation_turns) + 1 if hasattr(state, 'conversation_turns') else 1
-    store_turn(project_id, round_num, state.user_input, state.final_response or "")
+    store_turn(workspace_dir, chat_id, round_num, state.user_input, state.final_response or "",
+               sections=getattr(state, 'sections', None))
 
 
-def _maybe_compress(project_id: str, llm: LLMProvider):
-    uncompressed = count_uncompressed_turns(project_id)
+def _maybe_compress(workspace_dir: str, chat_id: str, llm: LLMProvider):
+    uncompressed = count_uncompressed_turns(workspace_dir, chat_id)
     if uncompressed > 10:
-        all_turns = get_recent_turns(project_id, limit=uncompressed)
+        all_turns = get_recent_turns(workspace_dir, chat_id, limit=uncompressed)
         old_turns = all_turns[:-5]
         if old_turns:
             turns_text = "\n".join([f"用户: {t.user_message}\n助手: {t.assistant_message}" for t in old_turns])
@@ -578,27 +551,16 @@ def _maybe_compress(project_id: str, llm: LLMProvider):
                     f"对话:\n{turns_text}"}],
                 max_tokens=200
             )
-            mark_compressed([t.id for t in old_turns if t.id], summary)
+            indices = [i for i, t in enumerate(old_turns) if t.id]
+            mark_compressed(workspace_dir, chat_id, indices, summary)
 
-            # Generate progress summary and write to notes
             try:
-                from research_agent.store import get_project, update_project
-                project = get_project(project_id)
-                if project:
-                    progress_prompt = f"基于以下对话，用一句话总结当前项目进度（已完成什么、正在做什么、下一步做什么）:\n{turns_text}"
-                    progress = llm.complete([{"role": "user", "content": progress_prompt}], max_tokens=100)
-                    existing = getattr(project.accumulated_wisdom, 'notes', "") or ""
-                    # Dedup: check if a similar note already exists
-                    should_append = True
-                    if existing:
-                        from difflib import SequenceMatcher
-                        for line in existing.split("\n"):
-                            if SequenceMatcher(None, line, progress).ratio() > 0.75:
-                                should_append = False
-                                break
-                    if should_append:
-                        project.accumulated_wisdom.notes = existing + f"\n[进度] {progress}" if existing else f"[进度] {progress}"
-                        update_project(project)
+                from research_agent import project_manager as pm
+                existing_progress = pm.load_progress(workspace_dir)
+                progress_prompt = f"基于以下对话，用一句话总结当前项目进度（已完成什么、正在做什么、下一步做什么）:\n{turns_text}"
+                progress = llm.complete([{"role": "user", "content": progress_prompt}], max_tokens=100)
+                new_progress = existing_progress + f"\n[进度] {progress}" if existing_progress else f"[进度] {progress}"
+                pm.update_progress(workspace_dir, new_progress)
             except Exception:
                 pass
 
@@ -609,13 +571,14 @@ def _mark_waiting_if_needed(state: AgentState):
         if task:
             state.active_project.status = ProjectStatus.WAITING
             state.active_project.pending_task = task
-            update_project(state.active_project)
 
 
 def process_user_input(state: AgentState, thread_id: str = "default") -> AgentState:
     from research_agent.llm import LiteLLMProvider
     llm = LiteLLMProvider()
-    return run_agent(state.user_input, llm, state)
+    return run_agent(state.user_input, llm, state,
+                     workspace_dir=getattr(state, 'workspace_dir', ''),
+                     chat_id=getattr(state, 'active_chat_id', ''))
 
 
 def chat(message: str, state: AgentState | None = None, thread_id: str = "default") -> AgentState:

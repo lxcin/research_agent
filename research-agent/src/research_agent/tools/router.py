@@ -1,9 +1,8 @@
-"""ToolRouter — intent-to-tool-subset routing to reduce LLM tool confusion."""
-import logging
+"""ToolRouter — intent-to-tool-subset routing.
+Deprecated for function calling: LLMs handle 13+ tools fine.
+Kept as debugging/dev utility: anti_confusion_hints, audit_tool_confusion.
+"""
 from difflib import SequenceMatcher
-from typing import Optional
-
-logger = logging.getLogger(__name__)
 
 # Intent → specific tool names to expose
 INTENT_ROUTES: dict[str, list[str]] = {
@@ -75,6 +74,7 @@ def route_tools(intent: str, registry) -> list[dict]:
     return [t.to_openai_schema() for t in filtered.values()]
 
 
+# Used in tests
 def add_anti_confusion_hints(descriptions: dict[str, str]) -> dict[str, str]:
     """Add 'NOT for' hints to tool descriptions to disambiguate similar tools."""
     # Pairs that LLMs often confuse: {name: "not_for_description"}
@@ -137,6 +137,7 @@ def add_anti_confusion_hints(descriptions: dict[str, str]) -> dict[str, str]:
     return result
 
 
+# Used in tests
 def compute_similarity_scores(descriptions: dict[str, str]) -> list[dict]:
     """Compute pairwise similarity of tool descriptions. Flags >70% as potential confusion."""
     pairs = []
@@ -156,6 +157,7 @@ def compute_similarity_scores(descriptions: dict[str, str]) -> list[dict]:
     return pairs
 
 
+# Used in tests
 def audit_tool_confusion(registry) -> dict:
     """Run a full confusion audit on registered tools. Returns {pairs, warnings}."""
     tools = registry.tools

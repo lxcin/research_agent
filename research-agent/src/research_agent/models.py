@@ -1,6 +1,5 @@
 """Core data models for research-agent."""
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 
 
@@ -30,13 +29,6 @@ class Paper:
     file_path: str = ""
 
 @dataclass
-class Chunk:
-    id: str | None = None
-    paper_id: str = ""
-    text: str = ""
-    chunk_index: int = 0
-
-@dataclass
 class PendingTask:
     description: str = ""
     expected_format: str = ""
@@ -44,49 +36,22 @@ class PendingTask:
 
 
 @dataclass
-class PlanStep:
-    step: str = ""
-    owner: str = "agent"
-    status: str = "pending"
-    depends_on: list[str] = field(default_factory=list)
-
-
-@dataclass
-class Pitfall:
-    phenomenon: str = ""
-    root_cause: str = ""
-    solution: str = ""
-    improvement: str = ""
-
-
-@dataclass
-class AccumulatedWisdom:
-    sops: list[str] = field(default_factory=list)
-    pitfalls: list[dict] = field(default_factory=list)
-    frameworks: list[str] = field(default_factory=list)
-    agent_improvements: list[str] = field(default_factory=list)
-    notes: str = ""
-
-
-@dataclass
 class Project:
     id: str | None = None
     topic: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
-    history_summary: str = ""
-    accumulated_wisdom: AccumulatedWisdom = field(default_factory=AccumulatedWisdom)
-    intro_summary: str = ""
-    plan: list[PlanStep] = field(default_factory=list)
+    progress_text: str = ""
     pending_task: PendingTask | None = None
     created_at: str = ""
     updated_at: str = ""
     workspace_dir: str = ""
 @dataclass
 class AgentState:
-    """LangGraph state schema. Memory lives in LangGraph checkpoint per thread_id (project_id)."""
+    """Agent execution state. workspace_dir and active_chat_id supersede the old project routing."""
     user_input: str = ""
+    workspace_dir: str = ""
+    active_chat_id: str = ""
     active_project: Project | None = None
-    all_projects: list[Project] = field(default_factory=list)
     retrieved_chunks: list[dict] = field(default_factory=list)
     retrieved_context: list[dict] = field(default_factory=list)
     retrieval_sufficient: bool = False
@@ -102,6 +67,7 @@ class AgentState:
     compressed_summaries: list[str] = field(default_factory=list)
     round_count: int = 0
     errors: list[str] = field(default_factory=list)
+    sections: list[dict] = field(default_factory=list)
 
 
 @dataclass

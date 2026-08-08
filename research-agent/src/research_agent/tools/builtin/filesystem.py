@@ -2,40 +2,26 @@
 All operations scoped to project working directory for safety."""
 
 import subprocess
-import tempfile
 import os
-import shutil
 import glob as glob_mod
 import re
-from pathlib import Path
 
 from research_agent.tools.schema import ToolSchema, ToolResult
 
 
 def _get_project_dir(state) -> str:
-    """Get project working directory. Uses user-set workspace_dir if available."""
-    pid = getattr(state, 'active_project', None)
-    pid = getattr(pid, 'id', None) if pid else None
-    
-    if pid:
-        from research_agent.store import get_project
-        project = get_project(pid)
-        # Check if project has a custom workspace dir
-        if project and getattr(project, 'workspace_dir', ''):
-            ws = project.workspace_dir  # type: ignore
-            if ws and os.path.isdir(ws):
-                return ws
-
-    # Fallback to default data dir
+    """Get project working directory from state.workspace_dir."""
+    ws = getattr(state, 'workspace_dir', '')
+    if ws and os.path.isdir(ws):
+        return ws
     from research_agent.config import get_data_dir
-    base = get_data_dir() / "projects"
-    proj_dir = base / (pid or "default")
-    proj_dir.mkdir(parents=True, exist_ok=True)
-    return str(proj_dir)
+    ws = str(get_data_dir() / "workspaces" / "default")
+    os.makedirs(ws, exist_ok=True)
+    return ws
 
 
 def _safe_path(project_dir: str, user_path: str) -> str | None:
-    """Resolve and validate path is within project directory."""
+    """Resolve and validate path is within project/workspace directory."""
     resolved = os.path.normpath(os.path.join(project_dir, user_path))
     if not resolved.startswith(os.path.normpath(project_dir)):
         return None  # Path traversal attempt
@@ -169,7 +155,7 @@ def _handle_file_write(params: dict, llm, state, emit) -> ToolResult:
         os.makedirs(os.path.dirname(full_path) or proj_dir, exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
-        emit("tool", {"tool": "file_write", "status": "done", "path": path})
+        emit("file_change", {"tool_id": getattr(state, '_current_tool_id', 'unknown'), "path": path, "action": "create", "diff": f"+ {content[:200]}"})
         return ToolResult.ok(path=path, size=len(content))
     except Exception as e:
         return ToolResult.fail(str(e))
@@ -381,7 +367,7 @@ def _handle_file_edit(params: dict, llm, state, emit) -> ToolResult:
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(new_content)
 
-        emit("tool", {"tool": "file_edit", "status": "done", "path": path})
+        emit("file_change", {"tool_id": getattr(state, '_current_tool_id', 'unknown'), "path": path, "action": "edit", "diff": f"- {old_str[:60]}\n+ {new_str[:60]}"})
         return ToolResult.ok(path=path, replaced=True, old_length=len(old_str), new_length=len(new_str))
     except Exception as e:
         return ToolResult.fail(str(e))

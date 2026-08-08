@@ -3,9 +3,21 @@ import tiktoken
 from research_agent.config import get_max_context_tokens
 from research_agent.models import AgentState, ConversationTurn
 
-BASE_SYSTEM_PROMPT = """You are PaperPilot, a research assistant. Think before acting. Base all conclusions on data or run results. Use update_notes to record findings. Be honest about limitations.
+BASE_SYSTEM_PROMPT = """You are PaperPilot, a research assistant.
 
-你是 PaperPilot，一个研究助手。思考后行动。结论基于数据或运行结果。随时用 update_notes 记录发现。诚实面对能力边界，不编造结果。Always match the user's language in your response."""
+你是 PaperPilot，一个研究助手。直接做事，不要解释过程，不要长篇计划。最终回复格式：简短结果总结 + 下一步建议（可选）。
+
+回复规则：
+- 文件创建/编辑成功后：只说"已创建 xxx"或"已修改 xxx"，不要重复输出文件内容
+- 论文检索到结果后：简要列出标题和关键发现，不要照搬全文
+- 工具调用失败时：简短说明失败原因和建议
+- 最终回复永远不要包含道歉、"我可以帮你"、自我评价之类的话
+- 不要在第一句说"正在xxx..."——直接给出结果
+
+工具规则：
+- file_write 成功后不要用 shell_exec 验证，除非用户要求
+- retrieve 和 search_papers 二选一
+- literature_review 是写综述的一站式工具"""
 
 
 SURVEY_WORKFLOW = """## Survey Writing Protocol / 综述写作流程
@@ -31,52 +43,29 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
     # 1. Identity
     messages.append({"role": "system", "content": BASE_SYSTEM_PROMPT})
 
-    # 2. Tool capabilities
-    if registry:
-        messages.append({"role": "system", "content": registry.generate_capabilities()})
+    # 2. Tool capabilities — injected later by agent after intent routing
+    # (pass tool_names to inject filtered capabilities)
 
-    # 3. Project context + notes
-    if state.active_project:
+    # 3. Project context from workspace
+    ws = getattr(state, 'workspace_dir', '')
+    if ws:
+        from research_agent import project_manager as pm
+        proj_topic = state.active_project.topic if state.active_project else ws
+        proj = f"Project: {proj_topic} / 当前项目: {proj_topic}"
+        progress = pm.load_progress(ws)
+        if progress:
+            entries = progress.strip().split("\n")
+            recent = entries[-20:]
+            proj += f"\n项目进展:\n" + "\n".join(recent)
+        messages.append({"role": "system", "content": proj})
+    elif state.active_project:
         proj = f"Project: {state.active_project.topic} / 当前项目: {state.active_project.topic}"
-        notes = getattr(state.active_project.accumulated_wisdom, 'notes', '')
+        notes = getattr(state.active_project, 'progress_text', '')
         if notes:
             entries = notes.strip().split("\n")
             recent = entries[-10:]
             proj += f"\n研究笔记({len(entries)}条):\n" + "\n".join(recent)
-        if state.active_project.history_summary:
-            proj += f"\n项目摘要: {state.active_project.history_summary}"
         messages.append({"role": "system", "content": proj})
-
-        # Cross-project reference: semantic match on topic + intro summary
-        from research_agent.store import get_all_projects as gap
-        all_projects = gap()
-        # Build candidate pool: project topic + intro_summary
-        candidates = []
-        for p in all_projects:
-            if p.id == state.active_project.id:
-                continue
-            candidate_text = f"{p.topic} {p.intro_summary or ''}".strip()
-            if candidate_text:
-                candidates.append((p, candidate_text))
-        if candidates and len(state.user_input) > 5:
-            # Simple TF-like scoring: count word overlap (no new dependency)
-            query_words = set(state.user_input.lower().split())
-            scored = []
-            for proj, text in candidates:
-                text_words = set(text.lower().split())
-                if not query_words or not text_words:
-                    scored.append((proj, 0))
-                else:
-                    overlap = len(query_words & text_words) / min(len(query_words), len(text_words))
-                    scored.append((proj, overlap))
-            scored.sort(key=lambda x: x[1], reverse=True)
-            if scored and scored[0][1] > 0.15:  # threshold: >15% word overlap
-                matched_proj = scored[0][0]
-                p_notes = getattr(matched_proj.accumulated_wisdom, 'notes', '')
-                if p_notes:
-                    entries = p_notes.strip().split("\n")
-                    messages.append({"role": "system",
-                        "content": f"关联项目「{matched_proj.topic}」笔记:\n" + "\n".join(entries[-5:])})
 
     # 4. Conversation history
     if hasattr(state, 'conversation_turns') and state.conversation_turns:
@@ -129,14 +118,6 @@ def format_turns(turns: list[ConversationTurn]) -> str:
             lines.append(f"助手: {t.assistant_message}")
     return "\n".join(lines)
 
-
-def format_retrieved(items: list) -> str:
-    lines = []
-    for i, item in enumerate(items[:5]):
-        text = item.get("text", "") if isinstance(item, dict) else str(item)
-        source = item.get("source", "unknown") if isinstance(item, dict) else "unknown"
-        lines.append(f"[{i+1}] ({source}) {text[:300]}")
-    return "\n".join(lines)
 
 
 def trim_messages(messages: list[dict], max_tokens: int) -> list[dict]:

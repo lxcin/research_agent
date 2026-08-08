@@ -6,7 +6,7 @@ interface FileEntry {
 }
 
 interface WorkspaceSidebarProps {
-    projectId: string;
+    workspacePath: string;
     isOpen: boolean;
     onToggle: () => void;
     refreshKey?: number;
@@ -23,7 +23,7 @@ const EXT_ICONS: Record<string, string> = {
     json: '📋', md: '📝', txt: '📄', pdf: '📕', js: '💛',
 };
 
-export default function WorkspaceSidebar({ projectId, isOpen, onToggle, refreshKey }: WorkspaceSidebarProps) {
+export default function WorkspaceSidebar({ workspacePath, isOpen, onToggle, refreshKey }: WorkspaceSidebarProps) {
     const [files, setFiles] = useState<FileEntry[]>([]);
     const [dir, setDir] = useState('');
     const [preview, setPreview] = useState<{ name: string; content: string; ext: string } | null>(null);
@@ -32,15 +32,15 @@ export default function WorkspaceSidebar({ projectId, isOpen, onToggle, refreshK
     const dragging = useRef(false);
 
     const loadFiles = useCallback(() => {
-        fetch(`/api/workspace/${projectId}`)
+        if (!workspacePath) return;
+        fetch(`/api/workspaces/files?dir=${encodeURIComponent(workspacePath)}`)
             .then(r => r.json())
             .then(data => { setFiles(data.files || []); setDir(data.dir || ''); })
             .catch(() => {});
-    }, [projectId]);
+    }, [workspacePath]);
 
     useEffect(() => { if (isOpen) loadFiles(); }, [loadFiles, isOpen, refreshKey]);
 
-    // Resize drag
     useEffect(() => {
         const onMouseMove = (e: MouseEvent) => {
             if (!dragging.current) return;
@@ -57,10 +57,11 @@ export default function WorkspaceSidebar({ projectId, isOpen, onToggle, refreshK
     }, []);
 
     const handlePreview = (filename: string) => {
+        if (!workspacePath) return;
         const ext = filename.split('.').pop() || '';
         const textExts = ['py', 'md', 'txt', 'csv', 'json', 'html', 'js', 'css', 'yml', 'yaml'];
         if (!textExts.includes(ext)) return;
-        fetch(`/api/project-files/${projectId}/${filename}`)
+        fetch(`/api/workspaces/file?dir=${encodeURIComponent(workspacePath)}&path=${encodeURIComponent(filename)}`)
             .then(r => r.text())
             .then(text => setPreview({ name: filename, content: text, ext }))
             .catch(() => {});

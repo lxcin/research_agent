@@ -3,9 +3,10 @@ import { useRef, useCallback, KeyboardEvent, useState } from 'react';
 interface ChatInputProps {
   onSend: (text: string) => void;
   disabled?: boolean;
+  workspaceDir?: string;
 }
 
-export default function ChatInput({ onSend, disabled }: ChatInputProps) {
+export default function ChatInput({ onSend, disabled, workspaceDir }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
@@ -40,8 +41,11 @@ export default function ChatInput({ onSend, disabled }: ChatInputProps) {
     setUploading(true);
     const form = new FormData();
     form.append('file', file);
+    const url = workspaceDir
+      ? `/api/upload/pdf?dir=${encodeURIComponent(workspaceDir)}`
+      : '/api/upload/pdf';
     try {
-      const r = await fetch('/api/upload/pdf', { method: 'POST', body: form });
+      const r = await fetch(url, { method: 'POST', body: form });
       const data = await r.json();
       if (data.status === 'ok') {
         onSend(`阅读这篇论文: ${data.title}`);

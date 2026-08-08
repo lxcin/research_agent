@@ -1,8 +1,4 @@
-export interface PlanItem {
-    id: string;
-    text: string;
-    done: boolean;
-}
+import type { PlanItem } from '../types';
 
 interface PlanPanelProps {
     items: PlanItem[];

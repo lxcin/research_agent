@@ -76,32 +76,6 @@ def git_checkpoint(project_dir: str | Path, message: str) -> dict:
     return {"success": True, "message": r["stdout"] or "no changes to commit", "hash": ""}
 
 
-def git_log(project_dir: str | Path, n: int = 20) -> dict:
-    """Return the last n commits as a formatted string."""
-    d = str(project_dir)
-    r = _run_git(["log", "--oneline", f"-{n}"], d)
-    log_text = r["stdout"]
-    entries = [e for e in log_text.split("\n") if e.strip()]
-    return {"log": "\n".join(entries), "count": len(entries)}
-
-
-def git_rollback(project_dir: str | Path, commit_hash: str) -> dict:
-    """Hard reset the working tree to a given commit."""
-    d = str(project_dir)
-    r = _run_git(["reset", "--hard", commit_hash], d)
-    if not r["success"]:
-        return {"success": False, "error": r["stderr"] or "reset failed"}
-    return {"success": True, "restored_to": commit_hash}
-
-
-def git_status(project_dir: str | Path) -> dict:
-    """Return the working tree status."""
-    d = str(project_dir)
-    r = _run_git(["status", "--short"], d)
-    output = r["stdout"]
-    return {"clean": output == "", "output": output}
-
-
 def should_auto_checkpoint(action_names: list[str], has_errors: bool = False) -> bool:
     """Return True if this agent round should trigger a checkpoint."""
     if has_errors:

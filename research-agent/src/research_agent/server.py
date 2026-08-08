@@ -6,7 +6,6 @@ import os
 import threading
 import queue
 from pathlib import Path
-from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +15,6 @@ from pydantic import BaseModel
 import tempfile
 
 from research_agent.agent import AgentState, run_agent
-import litellm
 
 app = FastAPI(title="PaperPilot API")
 
@@ -48,22 +46,9 @@ class ApiConfig(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
-    project_id: str | None = None
+    workspace_dir: str = ""
+    chat_id: str = ""
     config: ApiConfig | None = None
-
-
-class ProjectCreate(BaseModel):
-    name: str
-
-
-class ProjectUpdate(BaseModel):
-    name: str | None = None
-    summary: str | None = None
-    status: str | None = None
-    workspace_dir: str | None = None
-
-
-_projects: list[dict] = []
 
 
 @app.get("/api/health")
@@ -109,46 +94,46 @@ async def chat(req: ChatRequest):
                 from research_agent.llm import LiteLLMProvider
                 llm = LiteLLMProvider(model=model, api_key=api_key, api_base=api_base)
                 state = AgentState(user_input=req.message)
-                result = run_agent(req.message, llm, state, on_event=emit)
+                workspace = req.workspace_dir or ""
+                chat = req.chat_id or ""
+                result = run_agent(req.message, llm, state, on_event=emit,
+                                   workspace_dir=workspace, chat_id=chat)
 
                 if result.retrieved_chunks:
                     sources = list({c.get('paper_id', '') for c in result.retrieved_chunks if c.get('paper_id')})
                     emit("sources", {"text": f"已搜索到 {len(result.retrieved_chunks)} 个片段，来自 {len(sources)} 篇论文"})
                     paper_info = []
                     seen = set()
+                    from research_agent.store import get_paper as db_get_paper
+                    from research_agent.vector_store import get_collection as get_vcoll
+                    vcoll = get_vcoll()
                     for c in result.retrieved_chunks:
                         pid = c.get("paper_id", "")
                         if pid and pid not in seen:
                             seen.add(pid)
-                            from research_agent.store import get_paper as db_get_paper
-                            from research_agent.vector_store import get_collection as get_vcoll
-                            vcoll = get_vcoll()
-                            for pid in list(seen):
-                                # Try summary doc first
-                                try:
-                                    result = vcoll.get(ids=[f"{pid}_summary"])
-                                    if result and result["metadatas"]:
-                                        m = result["metadatas"][0]
-                                        paper_info.append({
-                                            "id": pid,
-                                            "title": m.get("title", pid)[:120],
-                                            "authors": (m.get("authors", "").split(", ") if m.get("authors") else []),
-                                            "year": m.get("year", 0),
-                                            "abstract": (result["documents"][0] if result["documents"] else "")[:300],
-                                            "doi": m.get("doi", ""),
-                                        })
-                                        continue
-                                except Exception:
-                                    pass
-                                # Fallback to SQLite
-                                p = db_get_paper(pid)
-                                if p:
+                            try:
+                                res = vcoll.get(ids=[f"{pid}_summary"])
+                                if res and res["metadatas"]:
+                                    m = res["metadatas"][0]
                                     paper_info.append({
-                                        "id": pid, "title": p.title[:120], "authors": p.authors[:5],
-                                        "year": p.year, "abstract": p.abstract[:300], "doi": p.doi,
+                                        "id": pid,
+                                        "title": m.get("title", pid)[:120],
+                                        "authors": (m.get("authors", "").split(", ") if m.get("authors") else []),
+                                        "year": m.get("year", 0),
+                                        "abstract": (res["documents"][0] if res["documents"] else "")[:300],
+                                        "doi": m.get("doi", ""),
                                     })
-                                else:
-                                    paper_info.append({"id": pid, "title": pid[:80], "authors": [], "year": 0, "abstract": "", "doi": ""})
+                                    continue
+                            except Exception:
+                                pass
+                            p = db_get_paper(pid)
+                            if p:
+                                paper_info.append({
+                                    "id": pid, "title": p.title[:120], "authors": p.authors[:5],
+                                    "year": p.year, "abstract": p.abstract[:300], "doi": p.doi,
+                                })
+                            else:
+                                paper_info.append({"id": pid, "title": pid[:80], "authors": [], "year": 0, "abstract": "", "doi": ""})
                     if paper_info:
                         emit("citations", {"papers": paper_info})
 
@@ -176,68 +161,28 @@ async def chat(req: ChatRequest):
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-@app.get("/api/projects")
-async def list_projects():
-    return _projects
-
-
-@app.get("/api/projects/{project_id}")
-async def get_project(project_id: str):
-    from research_agent.store import get_project as db_get_project
-    proj = db_get_project(project_id)
-    if proj:
-        return {"id": proj.id, "name": proj.topic, "workspace_dir": proj.workspace_dir,
-                "status": proj.status.value if hasattr(proj.status, 'value') else str(proj.status)}
-    for p in _projects:
-        if p["id"] == project_id:
-            return p
-    raise HTTPException(404, "Project not found")
-
-
-@app.post("/api/projects")
-async def create_project(req: ProjectCreate):
-    from research_agent.store import insert_project
-    from research_agent.models import Project, ProjectStatus, AccumulatedWisdom
-    p = Project(
-        topic=req.name, status=ProjectStatus.ACTIVE,
-        created_at=datetime.now().isoformat(), updated_at=datetime.now().isoformat(),
-        accumulated_wisdom=AccumulatedWisdom(),
-    )
-    pid = insert_project(p)
-    p.id = pid
-    # Keep in-memory list for frontend compatibility
-    proj = {
-        "id": pid, "name": req.name, "status": "active",
-        "updated": "刚刚", "created": datetime.now().strftime("%Y-%m-%d"),
+@app.get("/api/workspaces")
+async def list_workspaces():
+    from research_agent import project_manager as pm
+    projects = pm.list_projects()
+    return [{
+        "id": p["project_id"], "name": p.get("topic", "") or p["workspace_dir"],
+        "workspace_dir": p["workspace_dir"], "status": p.get("status", "active"),
+        "updated": p.get("updated_at", ""), "created": p.get("created_at", ""),
         "summary": "", "progress": 0, "steps": [],
-    }
-    _projects.insert(0, proj)
-    return proj
+    } for p in projects]
 
 
-@app.put("/api/projects/{project_id}")
-async def update_project(project_id: str, req: ProjectUpdate):
-    from research_agent.store import get_project, insert_project
-    proj = get_project(project_id)
-    if not proj:
-        raise HTTPException(404, "Project not found")
-    if req.name is not None:
-        proj.topic = req.name
-    if req.workspace_dir is not None:
-        proj.workspace_dir = req.workspace_dir
-        # Ensure directory exists
-        import os
-        os.makedirs(req.workspace_dir, exist_ok=True)
-    insert_project(proj)
-    return {"id": proj.id, "topic": proj.topic, "workspace_dir": proj.workspace_dir}
-
-
-@app.get("/api/projects/{project_id}/conversations")
-async def get_conversations(project_id: str):
-    from research_agent.memory import get_all_turns
-    turns = get_all_turns(project_id)
-    return [{"role": "user" if i % 2 == 0 else "ai", "text": t.user_message if i % 2 == 0 else t.assistant_message,
-             "timestamp": t.timestamp} for i, t in enumerate(turns)]
+@app.get("/api/workspaces/info")
+async def get_workspace_info(dir: str = ""):
+    from research_agent import project_manager as pm
+    project_id = pm.get_project_id(dir)
+    projects = pm.list_projects()
+    for p in projects:
+        if p["project_id"] == project_id:
+            return {"id": p["project_id"], "name": p.get("topic", ""),
+                    "workspace_dir": p["workspace_dir"], "status": p.get("status", "active")}
+    raise HTTPException(404, "Project not found")
 
 
 @app.get("/api/graph")
@@ -312,7 +257,7 @@ async def delete_paper(paper_id: str):
 
 
 @app.post("/api/upload/pdf")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(file: UploadFile = File(...), dir: str = ""):
     ext = (file.filename or "").lower().rsplit(".", 1)[-1] if "." in (file.filename or "") else ""
     if ext not in ("pdf", "md", "txt"):
         raise HTTPException(400, "Only PDF, Markdown (.md) and text (.txt) files allowed")
@@ -332,6 +277,10 @@ async def upload_pdf(file: UploadFile = File(...)):
             title = file.filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
             paper, msg = ingest_text(text=text, title=title)
         if paper:
+            if dir:
+                from research_agent import project_manager as pm
+                from research_agent.store import link_paper_to_project
+                link_paper_to_project(paper.id, pm.get_project_id(dir))
             return {"status": "ok", "paper_id": paper.id, "title": paper.title, "message": msg}
         return {"status": "error", "message": msg}
     finally:
@@ -348,8 +297,10 @@ async def list_tools():
             for name, t in registry.tools.items()]
 
 
-@app.get("/api/projects/{project_id}/papers")
-async def get_project_papers(project_id: str):
+@app.get("/api/workspaces/papers")
+async def get_workspace_papers(dir: str = ""):
+    from research_agent import project_manager as pm
+    project_id = pm.get_project_id(dir)
     from research_agent.store import get_project_papers as gpp, get_paper
     paper_ids = gpp(project_id)
     papers = []
@@ -363,38 +314,90 @@ async def get_project_papers(project_id: str):
     return papers
 
 
-@app.get("/api/project-files/{project_id}/{filename:path}")
-async def serve_project_file(project_id: str, filename: str):
-    """Serve static files from project directory (HTML, images, etc.)."""
-    from research_agent.config import get_data_dir
-    proj_dir = get_data_dir() / "projects" / project_id
-    file_path = proj_dir / filename
-    if not file_path.exists() or not file_path.is_file():
+@app.get("/api/workspaces/paper")
+async def get_workspace_paper(dir: str = "", paper_id: str = ""):
+    if not paper_id:
+        raise HTTPException(400, "paper_id required")
+    from research_agent.store import get_paper as gp
+    from research_agent.vector_store import get_collection as get_vcoll
+
+    p = gp(paper_id)
+    if p:
+        return {
+            "id": p.id, "title": p.title, "year": p.year,
+            "authors": p.authors, "doi": p.doi,
+            "citation_count": p.citation_count, "abstract": p.abstract[:500],
+            "source_score": p.source_score,
+        }
+
+    try:
+        vcoll = get_vcoll()
+        res = vcoll.get(ids=[f"{paper_id}_summary"])
+        if res and res["metadatas"]:
+            m = res["metadatas"][0]
+            return {
+                "id": paper_id,
+                "title": m.get("title", paper_id),
+                "authors": [a.strip() for a in m.get("authors", "").split(",") if a.strip()],
+                "year": m.get("year", 0),
+                "abstract": (res["documents"][0] if res["documents"] else "")[:500],
+                "doi": m.get("doi", ""),
+                "citation_count": 0,
+                "source_score": 5,
+            }
+    except Exception:
+        pass
+
+    try:
+        vcoll = get_vcoll()
+        res = vcoll.get(where={"doi": f"arxiv:{paper_id}"})
+        if res and res["ids"]:
+            pid_db = res["ids"][0].replace("_summary", "")
+            pp = gp(pid_db)
+            if pp:
+                return {
+                    "id": pp.id, "title": pp.title, "year": pp.year,
+                    "authors": pp.authors, "doi": pp.doi,
+                    "citation_count": pp.citation_count, "abstract": pp.abstract[:500],
+                    "source_score": pp.source_score,
+                }
+            m = res["metadatas"][0]
+            return {
+                "id": pid_db,
+                "title": m.get("title", paper_id),
+                "authors": [a.strip() for a in m.get("authors", "").split(",") if a.strip()],
+                "year": m.get("year", 0),
+                "abstract": (res["documents"][0] if res["documents"] else "")[:500],
+                "doi": m.get("doi", ""),
+                "citation_count": 0,
+                "source_score": 5,
+            }
+    except Exception:
+        pass
+
+    raise HTTPException(404, "Paper not found")
+
+
+@app.get("/api/workspaces/file")
+async def serve_workspace_file(dir: str = "", path: str = ""):
+    """Serve static files from workspace directory (HTML, images, etc.)."""
+    proj_dir = dir
+    file_path = os.path.join(proj_dir, path)
+    if not os.path.isfile(file_path):
         raise HTTPException(404, "File not found")
-    # Security: only serve from project dir
-    resolved = file_path.resolve()
-    if not str(resolved).startswith(str(proj_dir.resolve())):
+    resolved = os.path.normpath(os.path.abspath(file_path))
+    if not resolved.startswith(os.path.normpath(os.path.abspath(proj_dir))):
         raise HTTPException(403)
     return FileResponse(file_path)
 
 
-@app.get("/api/workspace/{project_id}")
-async def list_workspace(project_id: str):
-    from research_agent.config import get_data_dir
-    from research_agent.store import get_project as db_get_project
+@app.get("/api/workspaces/files")
+async def list_workspace_files(dir: str = ""):
     import os as _os
 
-    # Use custom workspace_dir if set
-    proj = db_get_project(project_id)
-    if proj and proj.workspace_dir and _os.path.isdir(proj.workspace_dir):
-        proj_dir = proj.workspace_dir
-    else:
-        proj_dir = str(get_data_dir() / "projects" / project_id)
-
-    if not _os.path.exists(proj_dir):
-        return {"project_id": project_id, "dir": proj_dir, "files": []}
-
-    files = []
+    proj_dir = dir
+    if not proj_dir or not _os.path.isdir(proj_dir):
+        return {"project_id": "", "dir": proj_dir, "files": []}
 
     files = []
     for root, dirs, filenames in _os.walk(proj_dir):
@@ -411,7 +414,7 @@ async def list_workspace(project_id: str):
             files.append({"name": rel, "size": size})
 
     files.sort(key=lambda f: f["name"])
-    return {"project_id": project_id, "dir": str(proj_dir), "files": files[:100], "count": len(files)}
+    return {"project_id": dir, "dir": str(proj_dir), "files": files[:100], "count": len(files)}
 
 
 @app.get("/api/skills")
@@ -434,6 +437,71 @@ async def save_skill(name: str, body: dict):
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(content)
     return {"status": "ok"}
+
+
+@app.get("/api/chats")
+async def list_chats(workspace: str = ""):
+    if not workspace:
+        return []
+    from research_agent import project_manager as pm
+    return pm.list_chats(workspace)
+
+
+@app.post("/api/chats")
+async def create_chat(workspace: str = "", title: str = ""):
+    if not workspace:
+        raise HTTPException(400, "workspace parameter required")
+    from research_agent import project_manager as pm
+    chat_id = pm.create_chat(workspace, title)
+    return {"chat_id": chat_id}
+
+
+@app.get("/api/chats/{chat_id}")
+async def get_chat(chat_id: str, workspace: str = ""):
+    if not workspace:
+        raise HTTPException(400, "workspace parameter required")
+    from research_agent import project_manager as pm
+    chat = pm.load_chat(workspace, chat_id)
+    if not chat:
+        raise HTTPException(404, "Chat not found")
+    return chat
+
+
+@app.delete("/api/chats/{chat_id}")
+async def delete_chat(chat_id: str, workspace: str = ""):
+    if not workspace:
+        raise HTTPException(400, "workspace parameter required")
+    from research_agent import project_manager as pm
+    if not pm.delete_chat(workspace, chat_id):
+        raise HTTPException(404, "Chat not found")
+    return {"status": "deleted"}
+
+
+@app.put("/api/chats/{chat_id}")
+async def update_chat(chat_id: str, body: dict, workspace: str = ""):
+    if not workspace:
+        raise HTTPException(400, "workspace parameter required")
+    from research_agent import project_manager as pm
+    updates = {}
+    if "title" in body:
+        updates["title"] = body["title"]
+    if "workspace_dir" in body:
+        updates["workspace_dir"] = body["workspace_dir"]
+    if not updates:
+        raise HTTPException(400, "No valid fields to update")
+    if not pm.update_chat(workspace, chat_id, updates):
+        raise HTTPException(404, "Chat not found")
+    chat = pm.load_chat(workspace, chat_id)
+    return chat
+
+
+@app.get("/api/progress")
+async def get_progress(workspace: str = ""):
+    if not workspace:
+        return {"content": ""}
+    from research_agent import project_manager as pm
+    content = pm.load_progress(workspace)
+    return {"content": content}
 
 
 if __name__ == "__main__":

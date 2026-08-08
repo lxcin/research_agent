@@ -6,6 +6,20 @@ from dataclasses import dataclass, field
 from research_agent.llm import LLMProvider
 from research_agent.store import _get_db, init_db
 
+_kg_cache = {}
+
+
+def _get_total_kg_rows(db) -> int:
+    r1 = db.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+    r2 = db.execute("SELECT COUNT(*) FROM kg_relations").fetchone()[0]
+    r3 = db.execute("SELECT COUNT(*) FROM kg_papers").fetchone()[0]
+    return r1 + r2 + r3
+
+
+def invalidate_kg_cache():
+    global _kg_cache
+    _kg_cache = {}
+
 
 def _parse_json_response(raw: str) -> list | dict | None:
     """Strip markdown code fences and parse JSON."""
@@ -147,6 +161,7 @@ def save_claim(claim: Claim) -> str:
         (claim.id, claim.paper_id, claim.text, claim.claim_type, claim.confidence, claim.embedding_id)
     )
     db.commit()
+    invalidate_kg_cache()
     return claim.id
 
 
@@ -161,6 +176,7 @@ def save_relation(rel: Relation) -> str:
         (rel.id, rel.source_claim_id, rel.target_claim_id, rel.relation_type, rel.source_paper_id, rel.target_paper_id)
     )
     db.commit()
+    invalidate_kg_cache()
     return rel.id
 
 
@@ -172,11 +188,16 @@ def save_paper_node(paper_id: str, title: str, year: int = 0):
         (f"paper_{paper_id}", title, year)
     )
     db.commit()
+    invalidate_kg_cache()
 
 
 def load_graph() -> KnowledgeGraph:
     init_kg_tables()
     db = _get_db()
+    total = _get_total_kg_rows(db)
+    if _kg_cache and _kg_cache.get("row_count") == total:
+        return _kg_cache["graph"]
+
     kg = KnowledgeGraph()
 
     # Load paper nodes
@@ -200,6 +221,9 @@ def load_graph() -> KnowledgeGraph:
         rel = Relation(id=row[0], source_claim_id=row[1], target_claim_id=row[2], relation_type=row[3], source_paper_id=row[4], target_paper_id=row[5])
         kg.add_relation(rel)
 
+    _kg_cache.clear()
+    _kg_cache["graph"] = kg
+    _kg_cache["row_count"] = total
     return kg
 
 
@@ -337,42 +361,6 @@ Only output pairs that have a clear relationship. Skip unrelated pairs."""
     return relations
 
 
-def build_global_graph_on_ingest(paper_id: str, text: str, llm: LLMProvider) -> KnowledgeGraph:
-    # Extract title from text (first line "Title: xxx")
-    title = "Unknown Paper"
-    year = 0
-    for line in text.split("\n"):
-        if line.startswith("Title:"):
-            title = line[6:].strip()
-        if line.startswith("Year:"):
-            try:
-                year = int(line[5:].strip())
-            except ValueError:
-                pass
-
-    save_paper_node(paper_id, title, year)
-
-    new_claims = extract_claims(text, paper_id, llm)
-
-    # Deduplicate against existing claims
-    kg = load_graph()
-    existing_claims = [kg.graph.nodes[n]["claim"] for n in kg.graph.nodes
-                       if kg.graph.nodes[n].get("claim")]
-    new_claims = deduplicate_claims(new_claims, existing_claims, llm=llm)
-
-    for claim in new_claims:
-        save_claim(claim)
-
-    # Reload since we added new claims
-    kg = load_graph()
-    existing_claims = [kg.graph.nodes[n]["claim"] for n in kg.graph.nodes
-                       if kg.graph.nodes[n].get("claim")]
-
-    relations = detect_relations(new_claims, existing_claims, llm)
-    for rel in relations:
-        save_relation(rel)
-
-    return load_graph()
 
 
 def build_paper_argument_tree(paper_id: str, text: str, llm: LLMProvider) -> dict:
@@ -407,6 +395,7 @@ Paper text:
     return {"paper_id": paper_id, "tree": tree}
 
 
+# Used in tests
 def retrieve_from_graph(chunk_paper_id: str, query: str, kg: KnowledgeGraph) -> list[dict]:
     claims = kg.get_claims_for_paper(chunk_paper_id)
     results = []

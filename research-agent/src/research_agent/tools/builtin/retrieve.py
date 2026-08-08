@@ -31,9 +31,17 @@ def _link_to_project(state, paper):
     """Link ingested paper to active project."""
     try:
         pid_obj = getattr(state, 'active_project', None)
+        project_id = None
         if pid_obj and getattr(pid_obj, 'id', None):
+            project_id = pid_obj.id
+        else:
+            ws = getattr(state, 'workspace_dir', '')
+            if ws:
+                from research_agent.project_manager import get_project_id
+                project_id = get_project_id(ws)
+        if project_id:
             from research_agent.store import link_paper_to_project
-            link_paper_to_project(paper.id, pid_obj.id)
+            link_paper_to_project(paper.id, project_id)
     except Exception:
         pass
 
@@ -45,6 +53,11 @@ def _handle_retrieve(params: dict, llm, state, emit) -> ToolResult:
 
     pid = getattr(state, 'active_project', None)
     project_id = getattr(pid, 'id', None) if pid else None
+    if not project_id:
+        ws = getattr(state, 'workspace_dir', '')
+        if ws:
+            from research_agent.project_manager import get_project_id
+            project_id = get_project_id(ws)
 
     emit("tool", {"tool": "retrieve", "status": "start", "query": query})
     build_bm25_index()
@@ -219,6 +232,8 @@ def _handle_read_paper(params: dict, llm, state, emit) -> ToolResult:
             emit("tool", {"tool": "ingest", "status": "abstract_ingested", "title": title[:80]})
             _save_paper_workspace(state, meta, paper)
             _link_to_project(state, paper)
+            safe_name = meta.get("arxiv_id", pid).replace("/", "_").replace("\\", "_")
+            emit("file_change", {"tool_id": getattr(state, '_current_tool_id', 'unknown'), "path": f"papers/{safe_name}.md", "action": "create", "diff": f"+ {title}"})
         text = ingest_body
 
     # 4. Kick off async PDF download for full text
@@ -262,13 +277,15 @@ def _build_read_result(pid: str, text: str, state, source: str = "") -> ToolResu
 
     # Auto-save note
     try:
-        from research_agent.store import get_project, update_project
-        project = get_project(state.active_project.id) if state.active_project else None
-        if project:
-            existing = getattr(project.accumulated_wisdom, 'notes', "") or ""
+        ws = getattr(state, 'workspace_dir', '')
+        proj = getattr(state, 'active_project', None)
+        if proj:
             note_entry = f"[read] {title[:80] or pid} ({year})"
-            project.accumulated_wisdom.notes = existing + "\n" + note_entry if existing else note_entry
-            update_project(project)
+            existing = proj.progress_text or ""
+            proj.progress_text = existing + "\n" + note_entry if existing else note_entry
+            if ws:
+                from research_agent import project_manager as pm
+                pm.update_progress(ws, proj.progress_text)
     except Exception:
         pass
 
@@ -313,15 +330,17 @@ delete_paper_tool = ToolSchema(
 def _handle_update_notes(params: dict, llm, state, emit) -> ToolResult:
     notes = params.get("notes", "")
     if not notes.strip(): return ToolResult.fail("Missing notes")
-    from research_agent.store import get_project, update_project
-    project = get_project(state.active_project.id) if state.active_project else None
-    if not project: return ToolResult.fail("No active project")
+    from research_agent import project_manager as pm
+    proj = getattr(state, 'active_project', None)
+    if not proj: return ToolResult.fail("No active project")
+    ws = getattr(state, 'workspace_dir', '')
     from datetime import datetime
     ts = datetime.now().strftime("%H:%M")
-    existing = getattr(project.accumulated_wisdom, 'notes', "") or ""
+    existing = proj.progress_text or ""
     new_notes = existing + "\n" + f"[{ts}] {notes}" if existing else f"[{ts}] {notes}"
-    project.accumulated_wisdom.notes = new_notes
-    update_project(project)
+    proj.progress_text = new_notes
+    if ws:
+        pm.update_progress(ws, new_notes)
     return ToolResult.ok(entry=f"[{ts}] {notes}", count=new_notes.count("\n") + 1)
 
 

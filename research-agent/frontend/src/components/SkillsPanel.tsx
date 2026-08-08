@@ -33,7 +33,7 @@ export default function SkillsPanel() {
         setEditing(s);
         setDesc(s.description);
         setTriggers(s.triggers.join(', '));
-        fetch(`/api/project-files/_skills_/${s.name}.md`)
+        fetch(`/api/workspaces/file?dir=_skills_&path=${s.name}.md`)
             .then(r => r.text())
             .then(t => { const m = t.match(/^---[\s\S]*?---\n([\s\S]*)/); setBody(m ? m[1].trim() : ''); })
             .catch(() => setBody(''));

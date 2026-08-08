@@ -3,7 +3,6 @@ Clean → Chunk → Filter → Embed → Store → Provenance."""
 
 import json
 import re
-import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
 

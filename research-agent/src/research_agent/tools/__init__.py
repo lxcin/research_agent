@@ -68,13 +68,15 @@ class ToolRegistry:
             self._tool_list_cache = [t.to_openai_schema() for t in self._tools.values()]
         return self._tool_list_cache
 
-    def generate_capabilities(self) -> str:
-        """Generate a human-readable capability description from registered tools.
+    def generate_capabilities(self, tool_names: list[str] | None = None) -> str:
+        """Generate a human-readable capability description.
+        If tool_names is provided, only describe those tools.
         Injected into the system prompt so the LLM knows what it can do."""
-        if not self._tools:
+        tools = {k: v for k, v in self._tools.items() if tool_names is None or k in tool_names} if tool_names else self._tools
+        if not tools:
             return "你目前没有任何可用工具。"
         lines = ["可用工具："]
-        for tool in self._tools.values():
+        for tool in tools.values():
             lines.append(f"- {tool.name}: {tool.description}")
         return "\n".join(lines)
 

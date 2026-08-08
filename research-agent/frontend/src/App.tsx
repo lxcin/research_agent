@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import TopBar from './components/TopBar';
 import ChatArea from './components/ChatArea';
 import ChatInput from './components/ChatInput';
@@ -13,15 +13,14 @@ import WorkspaceSidebar from './components/WorkspaceSidebar';
 import SkillsPanel from './components/SkillsPanel';
 import ChatTabs from './components/ChatTabs';
 import ErrorBoundary from './components/ErrorBoundary';
-import type { PlanItem } from './components/PlanPanel';
-import type { Message, GraphData, PaperTree, Project, ApiConfig } from './types';
+import type { Message, MessageSection, PlanItem, ReplySection, GraphData, PaperTree, ApiConfig, ChatInfo } from './types';
 
 const EMPTY_GRAPH: GraphData = { nodes: [], edges: [] };
 const EMPTY_TREES: Record<string, PaperTree> = {};
-const DEFAULT_PROJECT_ID = '__default__';
 
 let msgId = 0;
 function generateId() { return 'msg_' + (++msgId) + '_' + Date.now(); }
+function generateChatId() { return 'chat_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
 
 function formatEventText(type: string, data: Record<string, any>): string {
   switch (type) {
@@ -51,42 +50,13 @@ function loadApiConfig(): ApiConfig {
   return { provider: '', apiKey: '', baseUrl: '', model: '' };
 }
 
-function loadProjects(): Project[] {
-  try {
-    const saved = localStorage.getItem('pp-projects');
-    if (saved) return JSON.parse(saved);
-  } catch {}
-  return [];
-}
-
-function saveProjects(projects: Project[]) {
-  localStorage.setItem('pp-projects', JSON.stringify(projects));
-}
-
-type ChatsMap = Record<string, Record<string, Message[]>>;
-type ChatMeta = { id: string; title: string };
-type ChatMetasMap = Record<string, ChatMeta[]>;
-
-function loadAllMessages(): ChatsMap {
-  try { const s = localStorage.getItem('pp-chats'); if (s) return JSON.parse(s); } catch {}
-  return {};
-}
-function saveAllMessages(map: ChatsMap) { localStorage.setItem('pp-chats', JSON.stringify(map)); }
-
-function loadChatMetas(): ChatMetasMap {
-  try { const s = localStorage.getItem('pp-chat-metas'); if (s) return JSON.parse(s); } catch {}
-  return {};
-}
-function saveChatMetas(map: ChatMetasMap) { localStorage.setItem('pp-chat-metas', JSON.stringify(map)); }
-
-function generateChatId() { return 'chat_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+const DEFAULT_WORKSPACE = 'default';
 
 export default function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('pp-theme') as 'light' | 'dark') || 'dark');
-  const [currentProjectId, setCurrentProjectId] = useState<string>(DEFAULT_PROJECT_ID);
-  const [allMessages, setAllMessages] = useState<ChatsMap>(loadAllMessages);
-  const [activeChatIds, setActiveChatIds] = useState<Record<string, string>>({});
-  const [chatMetas, setChatMetas] = useState<ChatMetasMap>(loadChatMetas);
+  const [allMessages, setAllMessages] = useState<Record<string, Message[]>>({});
+  const [currentChatId, setCurrentChatId] = useState<string>('');
+  const [chatMetas, setChatMetas] = useState<ChatInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -98,61 +68,71 @@ export default function App() {
   const [wsRefresh, setWsRefresh] = useState(0);
   const [citeDetail, setCiteDetail] = useState<any>(null);
   const [planItems, setPlanItems] = useState<PlanItem[]>([]);
-  const [projects, setProjects] = useState<Project[]>(loadProjects);
   const [apiConfig, setApiConfig] = useState<ApiConfig>(loadApiConfig);
   const [graphData, setGraphData] = useState<GraphData>(EMPTY_GRAPH);
   const [paperTrees, setPaperTrees] = useState<Record<string, PaperTree>>(EMPTY_TREES);
 
-  const currentChatId = activeChatIds[currentProjectId] || Object.keys(allMessages[currentProjectId] || {})[0] || '__init__';
+  const chatMetasRef = useRef(chatMetas);
+  useEffect(() => { chatMetasRef.current = chatMetas; }, [chatMetas]);
+  const currentChatIdRef = useRef(currentChatId);
+  useEffect(() => { currentChatIdRef.current = currentChatId; }, [currentChatId]);
+
+  const getActiveChatWorkspace = (): string => {
+    const meta = chatMetasRef.current.find(c => c.chat_id === currentChatIdRef.current);
+    return meta?.workspace_dir || DEFAULT_WORKSPACE;
+  };
+
+  const activeChat = chatMetas.find(c => c.chat_id === currentChatId);
+  const activeChatTitle = activeChat?.title || '';
+  const activeChatWorkspace = activeChat?.workspace_dir || DEFAULT_WORKSPACE;
 
   useEffect(() => {
-    if (!activeChatIds[currentProjectId]) {
-      const cid = generateChatId();
-      setAllMessages(prev => ({ ...prev, [currentProjectId]: { [cid]: [] } }));
-      setActiveChatIds(prev => ({ ...prev, [currentProjectId]: cid }));
-      setChatMetas(prev => ({ ...prev, [currentProjectId]: [{ id: cid, title: '' }] }));
-    }
-  }, [currentProjectId]);
-
-  // Load conversation history from server on project change
-  useEffect(() => {
-    fetch(`/api/projects/${currentProjectId}/conversations`)
+    fetch('/api/chats')
       .then(r => r.json())
-      .then((turns: any[]) => {
-        if (turns && turns.length > 0) {
-          const msgs = turns.map((t: any, i: number) => ({
-            id: `hist_${i}`, role: t.role, text: t.text,
-            timestamp: Date.now(), projectId: currentProjectId,
-          }));
-          const cid = activeChatIds[currentProjectId] || '__init__';
-          setAllMessages(prev => {
-            const existing = prev[currentProjectId]?.[cid] || [];
-            if (existing.length > 0) return prev; // already has messages
-            return { ...prev, [currentProjectId]: { [cid]: msgs } };
-          });
+      .then((chats: ChatInfo[]) => {
+        const list = Array.isArray(chats) ? chats : [];
+        setChatMetas(list);
+        if (list.length > 0) {
+          setCurrentChatId(list[0].chat_id);
+          fetch(`/api/chats/${encodeURIComponent(list[0].chat_id)}`)
+            .then(r => r.json())
+            .then((chat: any) => {
+              if (chat && chat.turns) {
+                const msgs = chat.turns.flatMap((t: any) => [
+                  { id: `hist_u_${t.round}`, role: 'user' as const, text: t.user || '', timestamp: Date.now() },
+                  { id: `hist_a_${t.round}`, role: 'ai' as const, text: t.assistant || '', sections: t.sections || [], timestamp: Date.now() },
+                ]);
+                setAllMessages({ [list[0].chat_id]: msgs });
+              } else {
+                setAllMessages({ [list[0].chat_id]: [] });
+              }
+            }).catch(() => setAllMessages({ [list[0].chat_id]: [] }));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!currentChatId) return;
+    fetch(`/api/chats/${encodeURIComponent(currentChatId)}`)
+      .then(r => r.json())
+      .then((chat: any) => {
+        if (chat && chat.turns) {
+          const msgs = chat.turns.flatMap((t: any) => [
+            { id: `hist_u_${t.round}`, role: 'user' as const, text: t.user || '', timestamp: Date.now() },
+            { id: `hist_a_${t.round}`, role: 'ai' as const, text: t.assistant || '', sections: t.sections || [], timestamp: Date.now() },
+          ]);
+          setAllMessages(prev => ({ ...prev, [currentChatId]: msgs }));
         }
       }).catch(() => {});
-  }, [currentProjectId]);
+  }, [currentChatId]);
 
-  const messages = (allMessages[currentProjectId]?.[currentChatId]) || [];
-  const currentProject = projects.find(p => p.id === currentProjectId);
+  const messages = allMessages[currentChatId] || [];
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('pp-theme', theme);
   }, [theme]);
-
-  useEffect(() => {
-    saveAllMessages(allMessages);
-  }, [allMessages]);
-
-  useEffect(() => {
-    saveChatMetas(chatMetas);
-  }, [chatMetas]);
-
-  useEffect(() => {
-    saveProjects(projects);
-  }, [projects]);
 
   useEffect(() => {
     fetch('/api/graph')
@@ -167,47 +147,61 @@ export default function App() {
   }, []);
 
   const setMessages = useCallback((updater: (prev: Message[]) => Message[]) => {
-    setAllMessages(prev => {
-      const projectMsgs = prev[currentProjectId] || {};
-      const chatMsgs = projectMsgs[currentChatId] || [];
-      return {
-        ...prev,
-        [currentProjectId]: { ...projectMsgs, [currentChatId]: updater(chatMsgs) },
-      };
-    });
-  }, [currentProjectId, currentChatId]);
+    setAllMessages(prev => ({
+      ...prev,
+      [currentChatId]: updater(prev[currentChatId] || []),
+    }));
+  }, [currentChatId]);
+
+  const handleChatTitleChange = useCallback((title: string) => {
+    setChatMetas(prev => prev.map(c => c.chat_id === currentChatId ? { ...c, title } : c));
+  }, [currentChatId]);
 
   const handleSend = useCallback((text: string) => {
-    // Auto-title chat on first message
-    const existing = allMessages[currentProjectId]?.[currentChatId];
-    if (!existing || existing.length === 0) {
-      const title = text.slice(0, 30);
-      setChatMetas(prev => ({
-        ...prev,
-        [currentProjectId]: (prev[currentProjectId] || []).map(c =>
-          c.id === currentChatId ? { ...c, title } : c),
-      }));
+    let cid = currentChatIdRef.current;
+    if (!cid) {
+      cid = generateChatId();
+      setCurrentChatId(cid);
+      setChatMetas(prev => [...prev, {
+        chat_id: cid,
+        title: text.slice(0, 30),
+        created_at: new Date().toISOString(),
+        turn_count: 0,
+        workspace_dir: DEFAULT_WORKSPACE,
+      }]);
+    } else {
+      setChatMetas(prev =>
+        prev.map(c => c.chat_id === cid && (!c.title || c.title === '新对话') ? { ...c, title: text.slice(0, 30) } : c)
+      );
     }
 
-    setMessages(prev => [...prev, { id: generateId(), role: 'user', text, timestamp: Date.now(), projectId: currentProjectId }]);
+    const appendMsg = (msg: Message) => {
+      setAllMessages(prev => ({ ...prev, [cid]: [...(prev[cid] || []), msg] }));
+    };
+    appendMsg({ id: generateId(), role: 'user', text, timestamp: Date.now() });
 
-    // Server handles API key validation — sends error if not configured
     setLoading(true);
     const msgId = generateId();
+    const ws = getActiveChatWorkspace();
 
     fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, config: apiConfig, project_id: currentProjectId }),
+      body: JSON.stringify({ message: text, config: apiConfig, workspace_dir: ws, chat_id: cid }),
     }).then(async response => {
       if (!response.ok) throw new Error('API error');
       const reader = response.body?.getReader();
       if (!reader) throw new Error('No reader');
       const decoder = new TextDecoder();
-      let aiText = '';
+      let currentSections: MessageSection[] = [];
+      let replySection: ReplySection | null = null;
       let buffer = '';
 
-      setMessages(prev => [...prev, { id: msgId, role: 'ai', text: '', timestamp: Date.now(), projectId: currentProjectId }]);
+      setMessages(prev => [...prev, { id: msgId, role: 'ai', text: '', timestamp: Date.now() }]);
+
+      const updateMsg = (sections: MessageSection[], replyText: string) => {
+        setMessages(prev => prev.map(m => m.id === msgId ? { ...m, sections: [...sections], text: replyText } : m));
+      };
 
       while (true) {
         const { done, value } = await reader.read();
@@ -220,154 +214,187 @@ export default function App() {
           if (!line.startsWith('data: ')) continue;
           try {
             const data = JSON.parse(line.slice(6));
-            if (data.type === 'chunk') {
-              aiText += data.text;
-              setMessages(prev => prev.map(m => m.id === msgId ? { ...m, text: aiText } : m));
-            } else if (data.type === 'step' && data.step === 'generate') {
-              aiText += `\n> ${data.text}\n`;
-              setMessages(prev => prev.map(m => m.id === msgId ? { ...m, text: aiText } : m));
-              markPlanDone('生成'); markPlanDone('回答'); markPlanDone('分析');
-            } else if (data.type === 'action') {
-              const a = data.action;
-              const q = (data.query || '').slice(0, 80);
-              const icon = a === 'retrieve' ? '🔍' : a === 'search_papers' ? '📡' : a === 'read_paper' ? '📖' : a === 'update_notes' ? '📝' : '🔧';
-              aiText += `\n> ${icon} **${a}**: ${q}\n`;
-              setMessages(prev => prev.map(m => m.id === msgId ? { ...m, text: aiText } : m));
-            } else if (data.type === 'tool' && data.status === 'file_saved') {
-              setWsRefresh(prev => prev + 1);
-              setMessages(prev => prev.map(m => m.id === msgId ? { ...m, text: aiText } : m));
-            } else if (data.type === 'tool') {
-              const st = data.status;
-              if (st === 'start' && data.tool === 'shell_exec') {
-                aiText += '<div class="tool-inline-exec">running... ' + (data.command || '').slice(0, 40) + '</div>\n';
-              } else if (st === 'done') {
-                aiText += `> ✅ 完成\n`;
-                if (data.path && (data.tool === 'file_write' || data.tool === 'file_edit')) {
-                  aiText += `\n<div class="file-link" data-path="${data.path}">📄 ${data.path}</div>\n`;
-                }
-                if (data.tool === 'retrieve') markPlanDone('检索');
-                else if (data.tool === 'search_papers') markPlanDone('搜索');
-                else if (data.tool === 'read_paper') markPlanDone('阅读');
-              } else if (st === 'empty' || st === 'failed') {
-                aiText += `> ❌ ${data.tool}: ${st}\n`;
-              } else if (st === 'error') {
-                aiText += `> ❌ ${data.tool}: ${data.error || 'error'}\n`;
-              } else if (st === 'found') {
-                aiText += `> 📄 找到 ${data.count || 0} 篇\n`;
-              } else if (st === 'escalate') {
-                aiText += `> ⬆ 升级 arXiv 搜索\n`;
-              } else if (st === 'error') {
-                aiText += `> ❌ ${data.error || 'error'}\n`;
+
+            if (data.type === 'thinking') {
+              currentSections.push({ type: 'thinking', text: data.text });
+              updateMsg(currentSections, replySection?.text || '');
+            }
+            else if (data.type === 'plan') {
+              const rawItems = data.items || [];
+              if (rawItems.length > 0 && typeof rawItems[0] === 'object') {
+                const items: PlanItem[] = rawItems.map((item: any) => ({
+                  id: item.id || `p_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                  text: item.text || '',
+                  done: item.done || false,
+                }));
+                currentSections.push({ type: 'plan', items });
+                setPlanItems(prev => [...prev, ...items]);
+                updateMsg(currentSections, replySection?.text || '');
+              } else {
+                const items: PlanItem[] = rawItems.map((t: string, i: number) => ({
+                  id: `plan_${Date.now()}_${i}`, text: t, done: false,
+                }));
+                currentSections.push({ type: 'plan', items });
+                setPlanItems(prev => [...prev, ...items]);
+                updateMsg(currentSections, replySection?.text || '');
               }
-              setMessages(prev => prev.map(m => m.id === msgId ? { ...m, text: aiText } : m));
-            } else {
-              aiText += formatEventText(data.type, data);
-              setMessages(prev => prev.map(m => m.id === msgId ? { ...m, text: aiText } : m));
+            }
+            else if (data.type === 'plan_done') {
+              for (let i = currentSections.length - 1; i >= 0; i--) {
+                const s = currentSections[i];
+                if (s.type === 'plan') {
+                  s.items = s.items.map(item => item.id === data.id ? { ...item, done: true } : item);
+                  break;
+                }
+              }
+              setPlanItems(prev => prev.map(p => p.id === data.id ? { ...p, done: true } : p));
+              updateMsg(currentSections, replySection?.text || '');
+            }
+            else if (data.type === 'tool_start') {
+              currentSections.push({
+                type: 'tool',
+                id: data.id,
+                name: data.name,
+                input: data.input || {},
+                status: 'running',
+              });
+              updateMsg(currentSections, replySection?.text || '');
+            }
+            else if (data.type === 'tool_end') {
+              const tool = currentSections.find(s => s.type === 'tool' && s.id === data.id);
+              if (tool && tool.type === 'tool') {
+                tool.status = data.status === 'error' ? 'error' : 'success';
+                tool.output = data.output;
+              }
+              updateMsg(currentSections, replySection?.text || '');
+            }
+            else if (data.type === 'file_change') {
+              const tool = currentSections.find(s => s.type === 'tool' && s.id === data.tool_id);
+              if (tool && tool.type === 'tool') {
+                tool.fileChange = { path: data.path, action: data.action, diff: data.diff };
+              }
+              setWsRefresh(prev => prev + 1);
+              updateMsg(currentSections, replySection?.text || '');
+            }
+            else if (data.type === 'reply') {
+              if (!replySection) {
+                replySection = { type: 'reply', text: data.text };
+                currentSections.push(replySection);
+              } else {
+                replySection.text += data.text;
+              }
+              updateMsg(currentSections, replySection.text);
+            }
+            else if (data.type === 'done') {
+              updateMsg(currentSections, replySection?.text || '');
+              fetch('/api/graph')
+                .then(r => r.json())
+                .then(data => setGraphData(data))
+                .catch(() => {});
+            }
+            else if (data.type === 'citations' && data.papers) {
+              setMessages(prev => prev.map(m => m.id === msgId ? { ...m, citations: data.papers } : m));
+            }
+            else if (data.type === 'error') {
+              currentSections.push({ type: 'thinking', text: `❌ ${data.text || 'Error'}` });
+              updateMsg(currentSections, replySection?.text || '');
+            }
+            else if (data.type === 'chunk') {
+              if (!replySection) {
+                replySection = { type: 'reply', text: data.text };
+                currentSections.push(replySection);
+              } else {
+                replySection.text += data.text;
+              }
+              updateMsg(currentSections, replySection.text);
+            }
+            else if (data.type === 'step' || data.type === 'action' || data.type === 'tool' || data.type === 'sources' || data.type === 'recall') {
+              const text = formatEventText(data.type, data);
+              if (text) {
+                if (!replySection) {
+                  replySection = { type: 'reply', text };
+                  currentSections.push(replySection);
+                } else {
+                  replySection.text += text;
+                }
+              }
+              if (data.type === 'step' && data.step === 'generate') {
+                markPlanDone('生成'); markPlanDone('回答'); markPlanDone('分析');
+              }
+              if (data.type === 'tool') {
+                const st = data.status;
+                if (st === 'done') {
+                  if (data.tool === 'retrieve') markPlanDone('检索');
+                  else if (data.tool === 'search_papers') markPlanDone('搜索');
+                  else if (data.tool === 'read_paper') markPlanDone('阅读');
+                }
+              }
+              if (data.type === 'tool' && data.status === 'file_saved') {
+                setWsRefresh(prev => prev + 1);
+              }
+              updateMsg(currentSections, replySection?.text || '');
             }
             if (data.type === 'citations' && data.papers) {
               setMessages(prev => prev.map(m => m.id === msgId ? { ...m, citations: data.papers } : m));
             }
-            if (data.type === 'plan' && data.items) {
-              const items: PlanItem[] = data.items.map((text: string, i: number) => ({
-                id: `plan_${Date.now()}_${i}`, text, done: false,
-              }));
-              setPlanItems(prev => [...prev, ...items]);
-            }
           } catch {}
         }
       }
-
-      fetch('/api/graph')
-        .then(r => r.json())
-        .then(data => setGraphData(data))
-        .catch(() => {});
     }).catch(() => {
       setMessages(prev => prev.map(m => m.id === msgId ? { ...m, text: '请求失败，请检查 API 配置和网络连接。' } : m));
     }).finally(() => setLoading(false));
-  }, [apiConfig, currentProjectId, setMessages]);
+  }, [apiConfig, setMessages]);
 
-const handleSelectProject = useCallback((id: string) => {
-    setCurrentProjectId(id);
-    setSidebarOpen(false);
+  const handleNewChat = useCallback(async () => {
+    const workspace = localStorage.getItem('pp-last-workspace') || DEFAULT_WORKSPACE;
+    try {
+      const res = await fetch(`/api/chats?workspace=${encodeURIComponent(workspace)}&title=${encodeURIComponent('新对话')}`, { method: 'POST' });
+      const chat: ChatInfo = await res.json();
+      setChatMetas(prev => [...prev, chat]);
+      setCurrentChatId(chat.chat_id);
+      setAllMessages(prev => ({ ...prev, [chat.chat_id]: [] }));
+    } catch {}
   }, []);
 
-  const handleNewChat = useCallback(() => {
-    const cid = generateChatId();
-    setAllMessages(prev => ({
-      ...prev,
-      [currentProjectId]: { ...(prev[currentProjectId] || {}), [cid]: [] },
-    }));
-    setActiveChatIds(prev => ({ ...prev, [currentProjectId]: cid }));
-    const meta: ChatMeta = { id: cid, title: '' };
-    setChatMetas(prev => ({
-      ...prev,
-      [currentProjectId]: [...(prev[currentProjectId] || []), meta],
-    }));
-  }, [currentProjectId]);
-
-  const handleCloseChat = useCallback((id: string) => {
-    const chats = allMessages[currentProjectId] || {};
-    if (Object.keys(chats).length <= 1) return;
+  const handleCloseChat = useCallback(async (id: string) => {
+    try { await fetch(`/api/chats/${encodeURIComponent(id)}`, { method: 'DELETE' }); } catch {}
     setAllMessages(prev => {
-      const p = { ...(prev[currentProjectId] || {}) };
-      delete p[id];
-      return { ...prev, [currentProjectId]: p };
+      const next = { ...prev };
+      delete next[id];
+      return next;
     });
-    setChatMetas(prev => ({
-      ...prev,
-      [currentProjectId]: (prev[currentProjectId] || []).filter(c => c.id !== id),
-    }));
-    if (id === currentChatId) {
-      const remaining = Object.keys(chats).filter(k => k !== id);
-      if (remaining.length > 0) setActiveChatIds(prev => ({ ...prev, [currentProjectId]: remaining[0] }));
+    const remaining = chatMetas.filter(c => c.chat_id !== id);
+    setChatMetas(remaining);
+    if (id === currentChatId && remaining.length > 0) {
+      setCurrentChatId(remaining[0].chat_id);
     }
-  }, [currentProjectId, currentChatId, allMessages]);
+  }, [currentChatId, chatMetas]);
 
-  const getCurrentChats = useCallback((): ChatMeta[] => {
-    return chatMetas[currentProjectId] || [];
-  }, [chatMetas, currentProjectId]);
+  const handlePickWorkspace = useCallback(() => {
+    const select = (path: string) => {
+      if (path && currentChatId) {
+        setChatMetas(prev => prev.map(c => c.chat_id === currentChatId ? { ...c, workspace_dir: path } : c));
+        localStorage.setItem('pp-last-workspace', path);
+      }
+    };
+    const w = window as any;
+    if (w.pywebview?.api?.pick_folder) {
+      w.pywebview.api.pick_folder().then((path: string) => {
+        if (path) select(path);
+        else {
+          const manual = prompt('输入工作区的完整路径\n例如: D:\\research\\my-project');
+          if (manual) select(manual.trim());
+        }
+      }).catch(() => {});
+      return;
+    }
+    const manual = prompt('输入工作区的完整路径\n例如: D:\\research\\my-project 或 /home/user/project');
+    if (manual) select(manual.trim());
+  }, [currentChatId]);
 
-  const handleNewProject = useCallback(() => {
-    fetch('/api/projects', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: '未命名项目' }),
-    })
-      .then(r => r.json())
-      .then(newProj => {
-        setProjects(prev => [{ ...newProj, steps: [], progress: 0 }, ...prev]);
-        setCurrentProjectId(newProj.id);
-        setSidebarOpen(false);
-      })
-      .catch(() => {
-        // Fallback: use timestamp-based ID
-        const fallback: Project = {
-          id: 'p_' + Date.now(),
-          name: '未命名项目',
-          status: 'active', updated: '刚刚',
-          created: new Date().toISOString().slice(0, 10),
-          summary: '', progress: 0, steps: [],
-        };
-        setProjects(prev => [fallback, ...prev]);
-        setCurrentProjectId(fallback.id);
-      });
-  }, []);
-
-  const handleRenameProject = useCallback((id: string, name: string) => {
-    setProjects(prev => prev.map(p => p.id === id ? { ...p, name } : p));
-  }, []);
-
-  const handleDeleteProject = useCallback((id: string) => {
-    setProjects(prev => prev.filter(p => p.id !== id));
-    if (currentProjectId === id) setCurrentProjectId(DEFAULT_PROJECT_ID);
-  }, [currentProjectId]);
-
-  const handleSetWorkspace = useCallback((projectId: string, dir: string) => {
-    fetch(`/api/projects/${projectId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace_dir: dir || null }),
-    }).catch(() => {});
+  const handleSelectChat = useCallback((id: string) => {
+    setCurrentChatId(id);
+    setSidebarOpen(false);
   }, []);
 
   const handleLoadPaperTree = useCallback((paperId: string) => {
@@ -393,6 +420,10 @@ const handleSelectProject = useCallback((id: string) => {
     setPlanItems(prev => prev.filter(p => !p.done));
   }, []);
 
+  const handleUpdateMessageSections = useCallback((msgId: string, sections: MessageSection[]) => {
+    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, sections } : m));
+  }, [setMessages]);
+
   return (
     <ErrorBoundary>
     <div className="app" onClick={(e) => {
@@ -401,7 +432,7 @@ const handleSelectProject = useCallback((id: string) => {
           const pid = target.getAttribute('data-pid');
           const title = target.getAttribute('title') || '';
           const pidVal = pid || '';
-          for (const chatMsgs of Object.values(allMessages[currentProjectId] || {})) {
+          for (const chatMsgs of Object.values(allMessages)) {
             for (const msg of chatMsgs) {
               if (msg.citations) {
                 const found = msg.citations.find((c: any) => c.id === pidVal);
@@ -416,10 +447,10 @@ const handleSelectProject = useCallback((id: string) => {
         }
       }}>
       <TopBar
-        projectName={currentProject?.name || '未命名项目'}
-        onProjectNameChange={name => {
-          if (currentProject) handleRenameProject(currentProject.id, name);
-        }}
+        chatTitle={activeChatTitle}
+        onChatTitleChange={handleChatTitleChange}
+        onNewChat={handleNewChat}
+        workspacePath={activeChatWorkspace}
         graphOpen={graphOpen}
         projectOpen={sidebarOpen}
         onGraphToggle={() => setGraphOpen(prev => !prev)}
@@ -433,15 +464,15 @@ const handleSelectProject = useCallback((id: string) => {
         hasApiConfig={!!apiConfig.apiKey}
         hasMessages={messages.length > 0}
         onClearMessages={() => {
-          if (confirm('确定清空当前项目对话？')) {
-            setAllMessages(prev => { const next = { ...prev }; delete next[currentProjectId]; return next; });
+          if (confirm('确定清空当前对话？')) {
+            setAllMessages(prev => ({ ...prev, [currentChatId]: [] }));
           }
         }}
       />
       <ChatTabs
-        chats={getCurrentChats()}
+        chats={chatMetas.map(c => ({ id: c.chat_id, title: c.title }))}
         activeId={currentChatId}
-        onSelect={id => setActiveChatIds(prev => ({ ...prev, [currentProjectId]: id }))}
+        onSelect={id => setCurrentChatId(id)}
         onNew={handleNewChat}
         onClose={handleCloseChat}
       />
@@ -454,11 +485,13 @@ const handleSelectProject = useCallback((id: string) => {
             planItems={planItems}
             onTogglePlanItem={handleTogglePlanItem}
             onClearPlan={handleClearPlan}
+            workspacePath={activeChatWorkspace}
+            onUpdateMessageSections={handleUpdateMessageSections}
           />
-          <ChatInput onSend={handleSend} disabled={loading} />
+          <ChatInput onSend={handleSend} disabled={loading} workspaceDir={activeChatWorkspace} />
         </div>
         <WorkspaceSidebar
-          projectId={currentProjectId}
+          workspacePath={activeChatWorkspace}
           isOpen={workspaceOpen}
           onToggle={() => setWorkspaceOpen(prev => !prev)}
           refreshKey={wsRefresh}
@@ -476,12 +509,12 @@ const handleSelectProject = useCallback((id: string) => {
       <ProjectSidebar
         isOpen={sidebarOpen}
         onToggle={() => setSidebarOpen(prev => !prev)}
-        projects={projects}
-        currentProjectId={currentProjectId}
-        onSelectProject={handleSelectProject}
-        onNewProject={handleNewProject}
-        onDeleteProject={handleDeleteProject}
-        onSetWorkspace={handleSetWorkspace}
+        chats={chatMetas}
+        currentChatId={currentChatId}
+        onSelectChat={handleSelectChat}
+        onNewChat={handleNewChat}
+        onDeleteChat={handleCloseChat}
+        onSetChatWorkspace={handlePickWorkspace}
       />
 
       <FloatingWindow
@@ -491,7 +524,7 @@ const handleSelectProject = useCallback((id: string) => {
         defaultWidth={420} defaultHeight={500}
         defaultTop={80} defaultLeft={360}
       >
-        <PaperLibrary />
+        <PaperLibrary workspacePath={activeChatWorkspace} />
       </FloatingWindow>
 
       <FloatingWindow

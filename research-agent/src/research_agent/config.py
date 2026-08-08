@@ -79,8 +79,6 @@ def get_api_base() -> str | None:
     return get_model_config().get("api_base")
 
 
-def get_llm_key() -> str | None:
-    return os.environ.get("RESEARCH_AGENT_LLM_KEY")
 
 
 def get_max_context_tokens(model_name: str = "") -> int:

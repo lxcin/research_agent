@@ -1,5 +1,6 @@
 """Pytest fixtures for research-agent tests."""
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -28,6 +29,17 @@ def temp_data_dir(monkeypatch):
             except Exception:
                 pass
             store_mod._DB = None
+
+
+@pytest.fixture
+def temp_workspace(temp_data_dir):
+    """Create a temp workspace directory with initialized project and chat."""
+    from research_agent import project_manager
+    ws = tempfile.mkdtemp()
+    project_manager.init_project(ws, topic="test")
+    chat_id = project_manager.create_chat(ws, title="test chat")
+    yield ws, chat_id
+    shutil.rmtree(ws, ignore_errors=True)
 
 
 @pytest.fixture

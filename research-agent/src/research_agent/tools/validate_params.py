@@ -1,5 +1,4 @@
 """Tool parameter validation — catches LLM malformed calls before dispatch."""
-from research_agent.trace_log import logger
 
 
 TOOL_REQUIRED_PARAMS = {

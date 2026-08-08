@@ -18,14 +18,43 @@ export interface Citation {
   doi?: string;
 }
 
+export interface ChatInfo {
+  chat_id: string;
+  title: string;
+  created_at: string;
+  turn_count: number;
+  workspace_dir?: string;
+}
+
+export interface PlanItem {
+  id: string;
+  text: string;
+  done: boolean;
+}
+
+export interface ThinkingSection { type: 'thinking'; text: string }
+export interface PlanSection { type: 'plan'; items: PlanItem[] }
+export interface ToolSection {
+  type: 'tool';
+  id: string;
+  name: string;
+  input: Record<string, any>;
+  output?: Record<string, any>;
+  status: 'running' | 'success' | 'error';
+  fileChange?: { path: string; action: string; diff: string }
+}
+export interface ReplySection { type: 'reply'; text: string }
+export type MessageSection = ThinkingSection | PlanSection | ToolSection | ReplySection;
+
 export interface Message {
   id: string;
   role: 'user' | 'ai';
   text: string;
   timestamp: number;
-  projectId?: string;
+  workspace?: string;
   toolCalls?: ToolCall[];
   citations?: Citation[];
+  sections?: MessageSection[];
 }
 
 export interface GraphNode {
@@ -64,21 +93,11 @@ export interface PaperTree {
   root: TreeNode;
 }
 
-export interface ProjectStep {
-  name: string;
-  status: 'done' | 'current' | 'pending';
-  time: string;
-}
-
 export interface Project {
   id: string;
   name: string;
+  workspace_dir: string;
   status: 'active' | 'paused' | 'done';
-  updated: string;
-  created: string;
-  summary: string;
-  progress: number;
-  steps: ProjectStep[];
 }
 
 export type WindowType = 'graph' | 'project' | null;

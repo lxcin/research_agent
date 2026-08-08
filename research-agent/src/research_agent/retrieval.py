@@ -1,10 +1,10 @@
 """Hybrid retrieval: vector search + BM25 + RRF fusion (k=60)."""
-from functools import lru_cache
-
 import jieba
 from rank_bm25 import BM25Okapi
 
 from research_agent.vector_store import get_collection
+
+_bm25_cache = {}
 
 
 def _tokenize_doc(text: str) -> list[str]:
@@ -27,11 +27,15 @@ def _tokenize_query(query: str) -> list[str]:
     return tokens
 
 
-@lru_cache(maxsize=1)
 def _get_bm25() -> tuple[BM25Okapi | None, list[dict]]:
     coll = get_collection()
+    current_count = coll.count()
+    if _bm25_cache and _bm25_cache.get("chunk_count") == current_count:
+        return _bm25_cache["bm25"], _bm25_cache["all_data"]
+
     chunks = coll.get()
     if not chunks["documents"]:
+        _bm25_cache.clear()
         return None, []
     tokenized = [_tokenize_doc(doc) for doc in chunks["documents"]]
     bm25 = BM25Okapi(tokenized)
@@ -41,12 +45,16 @@ def _get_bm25() -> tuple[BM25Okapi | None, list[dict]]:
          "chunk_index": chunks["metadatas"][i].get("chunk_index", 0)}
         for i in range(len(chunks["documents"]))
     ]
+    _bm25_cache.clear()
+    _bm25_cache["bm25"] = bm25
+    _bm25_cache["all_data"] = all_data
+    _bm25_cache["chunk_count"] = current_count
     return bm25, all_data
 
 
 def build_bm25_index():
     """Force rebuild BM25 index (call after adding/deleting chunks)."""
-    _get_bm25.cache_clear()
+    _bm25_cache.clear()
     try:
         _get_bm25()
     except Exception:
@@ -135,7 +143,3 @@ def hybrid_search(query: str, n_results: int = 5, project_id: str | None = None)
 
     return results[:n_results]
 
-
-def _cross_encoder_rerank(query: str, docs: list[dict], top_k: int) -> list[dict]:
-    """Placeholder for future cross-encoder reranker."""
-    return docs[:top_k]

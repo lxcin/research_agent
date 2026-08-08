@@ -25,7 +25,7 @@ test_queries = [
     ("读一下 paper_123 这篇论文", "read"),
     ("这篇论文讲了什么？", "read"),
     ("在 arxiv 上搜索最新的 diffusion 论文", "search"),
-        ("帮我搜一下 NLP 综述", "review"),  # 综述 keyword triggers review intent
+    ("帮我搜一下 NLP 综述", "review"),  # 综述 keyword triggers review intent
     ("写一个实验结果的分析笔记", "write"),
     ("把这个发现保存下来", "write"),
     ("运行 python train.py --epochs 10", "execute"),

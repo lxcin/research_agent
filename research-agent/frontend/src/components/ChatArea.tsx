@@ -1,9 +1,13 @@
 import type { ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { Message } from '../types';
-import type { PlanItem } from './PlanPanel';
+import type { Message, MessageSection } from '../types';
+import type { PlanItem } from '../types';
 import MermaidBlock from './MermaidBlock';
+import CitationCard from './CitationCard';
+import ToolCallBlock from './ToolCallBlock';
+import ThinkingBlock from './ThinkingBlock';
+import PlanPanel from './PlanPanel';
 
 function extractText(children: ReactNode): string {
   if (typeof children === 'string') return children;
@@ -15,6 +19,13 @@ function extractText(children: ReactNode): string {
   return '';
 }
 
+function preprocessPaperRefs(text: string): string {
+  return text.replace(
+    /\[?(paper:([a-zA-Z0-9.\-]+(?:\/[\w\-]+)?))\]?/g,
+    '[$1](#paper:$2)'
+  );
+}
+
 interface ChatAreaProps {
   messages: Message[];
   welcome?: boolean;
@@ -22,9 +33,11 @@ interface ChatAreaProps {
   planItems?: PlanItem[];
   onTogglePlanItem?: (id: string) => void;
   onClearPlan?: () => void;
+  workspacePath?: string;
+  onUpdateMessageSections?: (msgId: string, sections: MessageSection[]) => void;
 }
 
-export default function ChatArea({ messages, welcome, onSuggestionClick, planItems, onTogglePlanItem, onClearPlan }: ChatAreaProps) {
+export default function ChatArea({ messages, welcome, onSuggestionClick, planItems, onTogglePlanItem, onClearPlan, workspacePath, onUpdateMessageSections }: ChatAreaProps) {
   const done = planItems?.filter(i => i.done).length || 0;
   const total = planItems?.length || 0;
 
@@ -46,13 +59,108 @@ export default function ChatArea({ messages, welcome, onSuggestionClick, planIte
         )}
         {messages.map(msg => (
           <div key={msg.id} className={`message ${msg.role}`}>
-            {msg.text && (
+            {msg.sections && msg.sections.length > 0 && msg.role === 'ai' ? (
+              <div className="bubble">
+                {msg.sections.map((section, i) => {
+                  if (section.type === 'thinking') return <ThinkingBlock key={i} text={section.text} />;
+                  if (section.type === 'plan') return (
+                    <PlanPanel key={i} items={section.items}
+                      onToggle={(id) => {
+                        const updated = msg.sections!.map(s => {
+                          if (s.type === 'plan') return {
+                            ...s,
+                            items: s.items.map(item => item.id === id ? { ...item, done: !item.done } : item),
+                          };
+                          return s;
+                        });
+                        onUpdateMessageSections?.(msg.id, updated);
+                      }}
+                      onClear={() => {
+                        const updated = msg.sections!.map(s => {
+                          if (s.type === 'plan') return {
+                            ...s,
+                            items: s.items.filter(item => !item.done),
+                          };
+                          return s;
+                        });
+                        onUpdateMessageSections?.(msg.id, updated);
+                      }}
+                    />
+                  );
+                  if (section.type === 'tool') return <ToolCallBlock key={i} section={section} />;
+                  if (section.type === 'reply') return (
+                    <div key={i} className="reply-section">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          a: ({ href, children }) => {
+                            const hrefStr = href || '';
+                            if (hrefStr.startsWith('#paper:')) {
+                              const paperId = hrefStr.slice(7);
+                              const text = extractText(children);
+                              if (text.startsWith('paper:')) {
+                                return <CitationCard paperId={paperId} workspacePath={workspacePath} />;
+                              }
+                              return (
+                                <span className="paper-ref-bare" data-pid={paperId}>{children}</span>
+                              );
+                            }
+                            const text = extractText(children);
+                            if (text.match(/^\[\d+\]$/) && msg.citations) {
+                              const idx = parseInt(text.replace(/[\[\]]/g, '')) - 1;
+                              const paper = msg.citations[idx];
+                              if (paper) {
+                                return (
+                                  <span className="citation-link" data-pid={paper.id} title={paper.title}>
+                                    {text}
+                                  </span>
+                                );
+                              }
+                            }
+                            return <a href={href} target="_blank" rel="noopener">{children}</a>;
+                          },
+                          img: ({ src, alt }) => {
+                            return <img src={src} alt={alt || ''} className="chat-img" loading="lazy"
+                                        style={{maxWidth:'100%',borderRadius:'8px',margin:'8px 0'}} />;
+                          },
+                          code: ({ className, children, ...props }) => {
+                            const codeStr = extractText(children);
+                            const match = /language-(\w+)/.exec(className || '');
+                            if (match && match[1] === 'mermaid') {
+                                return <MermaidBlock chart={codeStr} />;
+                            }
+                            const isInline = !className;
+                            return isInline
+                              ? <code className="inline-code" {...props}>{children}</code>
+                              : <pre><code className={className} {...props}>{children}</code></pre>;
+                          },
+                        }}
+                      >
+                        {preprocessPaperRefs(section.text)}
+                      </ReactMarkdown>
+                    </div>
+                  );
+                  return null;
+                })}
+              </div>
+            ) : msg.text ? (
               <div className="bubble">
                 {msg.role === 'ai' ? (
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{
                       a: ({ href, children }) => {
+                        const hrefStr = href || '';
+                        if (hrefStr.startsWith('#paper:')) {
+                          const paperId = hrefStr.slice(7);
+                          const text = extractText(children);
+                          if (text.startsWith('paper:')) {
+                            return <CitationCard paperId={paperId} workspacePath={workspacePath} />;
+                          }
+                          return (
+                            <span className="paper-ref-bare" data-pid={paperId}>{children}</span>
+                          );
+                        }
                         const text = extractText(children);
                         if (text.match(/^\[\d+\]$/) && msg.citations) {
                           const idx = parseInt(text.replace(/[\[\]]/g, '')) - 1;
@@ -84,13 +192,13 @@ export default function ChatArea({ messages, welcome, onSuggestionClick, planIte
                       },
                     }}
                   >
-                    {msg.text}
+                    {preprocessPaperRefs(msg.text)}
                   </ReactMarkdown>
                 ) : (
                   msg.text
                 )}
               </div>
-            )}
+            ) : null}
           </div>
         ))}
       </div>
