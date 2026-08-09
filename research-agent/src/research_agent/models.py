@@ -68,6 +68,7 @@ class AgentState:
     round_count: int = 0
     errors: list[str] = field(default_factory=list)
     sections: list[dict] = field(default_factory=list)
+    _pending_confirms: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -2,10 +2,14 @@
 import json
 import os
 import re
+import subprocess
+import sys
+import threading
+import uuid as _uuid
 from datetime import datetime
 from typing import Callable
 
-from research_agent.models import AgentState, Project, ProjectStatus, ConversationTurn, PendingTask
+from research_agent.models import AgentState, Project, ProjectStatus, ConversationTurn, PendingTask, Action
 from research_agent.llm import LLMProvider
 from research_agent.context import build_context
 from research_agent.retrieval import hybrid_search, build_bm25_index
@@ -16,9 +20,9 @@ from research_agent.validate import validate_response
 from research_agent.config import get_temperature, get_max_output_tokens
 from research_agent.trace_log import set_trace_id, logger
 
-MAX_ROUNDS = 5
+MAX_ROUNDS = int(os.environ.get("RESEARCH_AGENT_MAX_ROUNDS", "50"))
 MAX_TOTAL_RETRIES = 5
-MAX_SEARCH_CALLS = 2  # max search_papers calls per run — force read after
+MAX_SEARCH_CALLS = int(os.environ.get("RESEARCH_AGENT_MAX_SEARCH", "10"))
 LLM_RETRY_BACKOFF = [1, 2, 4]  # seconds between retries
 
 EventCallback = Callable[[str, dict], None]
@@ -241,6 +245,65 @@ def _stream_response_once(llm: LLMProvider, messages: list[dict], emit: EventCal
     return content
 
 
+def _auto_validate(state, tc_name, tc_params, messages, on_event):
+    """After file_write/file_edit, auto-validate and inject feedback."""
+    if tc_name not in ("file_write", "file_edit"):
+        return
+
+    path = tc_params.get("path", "")
+    if not path:
+        return
+
+    from research_agent.tools.builtin.filesystem import _get_project_dir, _safe_path
+    proj_dir = _get_project_dir(state)
+    full_path = _safe_path(proj_dir, path)
+    if not full_path or not os.path.isfile(full_path):
+        return
+
+    ext_checks = []
+
+    if path.endswith(".py"):
+        ext_checks.append(("syntax", [
+            sys.executable, "-c",
+            f"import py_compile; py_compile.compile({repr(full_path)}, doraise=True)",
+        ]))
+        if path.endswith("_test.py") or os.path.basename(path).startswith("test_"):
+            ext_checks.append(("tests", [
+                sys.executable, "-m", "pytest", full_path, "--tb=short", "-q",
+            ]))
+    elif path.endswith(".java"):
+        ext_checks.append(("compile", ["javac", full_path]))
+    else:
+        return
+
+    has_error = False
+    error_stderr = ""
+
+    for check_name, cmd in ext_checks:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                has_error = True
+                error_stderr += f"\n[{check_name} check failed]\n{result.stderr}"
+                if result.stdout:
+                    error_stderr += f"\n{result.stdout}"
+        except FileNotFoundError:
+            pass
+        except subprocess.TimeoutExpired:
+            has_error = True
+            error_stderr += f"\n[{check_name} check timed out]"
+        except Exception as e:
+            has_error = True
+            error_stderr += f"\n[{check_name} check error: {e}]"
+
+    if has_error:
+        msg = f"[自动验证] {path} 检查失败:\n{error_stderr.strip()}"
+        messages.append({"role": "system", "content": msg})
+        _emit(on_event, "thinking", {"text": f"自动验证失败: {path} - {error_stderr.strip()[:100]}"})
+
+
 def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
               on_event: EventCallback = None,
               workspace_dir: str = "", chat_id: str = "") -> AgentState:
@@ -408,6 +471,30 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                 _emit(on_event, "tool_start", {"id": tc_id, "name": tc_name, "input": tc_input})
                 state._current_tool_id = tc_id
 
+                # ── Guardrail: HITL confirmation for dangerous commands ──
+                if tc_name == "shell_exec":
+                    from research_agent.guardrail import guardrail as g_rail
+                    block_reason = g_rail(Action(action=tc_name, query=tc_input.get("command", "")))
+                    if block_reason:
+                        confirm_id = str(_uuid.uuid4())[:8]
+                        command_text = tc_input.get("command", "")
+                        _emit(on_event, "confirm_required", {
+                            "id": confirm_id,
+                            "tool": tc_name,
+                            "command": command_text[:200],
+                            "reason": block_reason
+                        })
+                        confirm_event = threading.Event()
+                        state._pending_confirms[confirm_id] = {"event": confirm_event, "approved": False}
+                        confirm_event.wait(timeout=60)
+                        confirmed = state._pending_confirms.pop(confirm_id, {}).get("approved", False)
+                        if not confirmed:
+                            cancel_msg = f"User cancelled: {block_reason}"
+                            _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": cancel_msg}})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                             "content": json.dumps({"error": cancel_msg}, ensure_ascii=False)})
+                            continue
+
                 if tc["name"] in ("retrieve", "search_papers"):
                     total_search_rounds += 1
 
@@ -464,6 +551,9 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                 _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "success", "output": result.data})
                 messages.append({"role": "tool", "tool_call_id": tc["id"],
                                  "content": json.dumps(result.data, ensure_ascii=False)})
+
+                if tc_name in ("file_write", "file_edit"):
+                    _auto_validate(state, tc_name, tc["params"], messages, on_event)
 
                 if tc["name"] == "search_papers" and result.data.get("found", 0) > 0:
                     search_papers_found = True

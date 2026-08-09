@@ -16,6 +16,8 @@ import tempfile
 
 from research_agent.agent import AgentState, run_agent
 
+_active_states: dict[str, AgentState] = {}
+
 app = FastAPI(title="PaperPilot API")
 
 app.add_middleware(
@@ -96,6 +98,7 @@ async def chat(req: ChatRequest):
                 state = AgentState(user_input=req.message)
                 workspace = req.workspace_dir or ""
                 chat = req.chat_id or ""
+                _active_states[chat or "default"] = state
                 result = run_agent(req.message, llm, state, on_event=emit,
                                    workspace_dir=workspace, chat_id=chat)
 
@@ -502,6 +505,18 @@ async def get_progress(workspace: str = ""):
     from research_agent import project_manager as pm
     content = pm.load_progress(workspace)
     return {"content": content}
+
+
+@app.post("/api/confirm")
+async def confirm_action(body: dict):
+    confirm_id = body.get("confirm_id", "")
+    approved = body.get("approved", False)
+    for state in _active_states.values():
+        if confirm_id in state._pending_confirms:
+            state._pending_confirms[confirm_id]["approved"] = approved
+            state._pending_confirms[confirm_id]["event"].set()
+            return {"status": "ok"}
+    raise HTTPException(404, "Confirmation not found")
 
 
 if __name__ == "__main__":

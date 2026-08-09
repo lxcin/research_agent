@@ -24,7 +24,7 @@ jobs:
       - name: Run tests
         run: |
           pip install pytest-timeout
-          PYTHONPATH=src pytest tests/ -v --tb=short -k "not (test_e2e or test_integration or test_llm or test_vector_store or test_retrieval or test_ingestion or test_memory)"
+          PYTHONPATH=src pytest tests/ -v --tb=short -k "not (test_e2e or test_integration or test_llm or test_vector_store or test_retrieval or test_ingestion)"
         working-directory: research-agent
 
       - name: Check credentials
@@ -39,6 +39,10 @@ jobs:
           test -f SPEC_PROCESS.md && echo "PROCESS OK"
           test -f AGENT_LOG.md && echo "LOG OK"
           test -f REFLECTION.md && echo "REFLECTION OK"
+        working-directory: research-agent
+
+      - name: Run mechanism demo
+        run: PYTHONPATH=src python tests/demo_mechanisms.py
         working-directory: research-agent
 
   frontend:
@@ -60,9 +64,17 @@ jobs:
     needs: [backend, frontend]
     steps:
       - uses: actions/checkout@v4
-      - name: Build backend
+      - name: Build backend image
         run: docker build -f Dockerfile.backend -t pp-backend:ci .
         working-directory: research-agent
-      - name: Build frontend
+      - name: Build frontend image
         run: docker build -f Dockerfile.frontend -t pp-frontend:ci .
         working-directory: research-agent
+      - name: Push images to GHCR
+        if: github.ref == 'refs/heads/master'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker tag pp-backend:ci ghcr.io/${{ github.repository }}/pp-backend:latest
+          docker tag pp-frontend:ci ghcr.io/${{ github.repository }}/pp-frontend:latest
+          docker push ghcr.io/${{ github.repository }}/pp-backend:latest
+          docker push ghcr.io/${{ github.repository }}/pp-frontend:latest

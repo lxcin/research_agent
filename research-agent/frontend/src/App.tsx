@@ -299,6 +299,20 @@ export default function App() {
               currentSections.push({ type: 'thinking', text: `❌ ${data.text || 'Error'}` });
               updateMsg(currentSections, replySection?.text || '');
             }
+            else if (data.type === 'confirm_required') {
+              const approved = window.confirm(
+                `⚠ 危险操作需要确认\n\n` +
+                `工具: ${data.tool}\n` +
+                `命令: ${data.command}\n` +
+                `原因: ${data.reason}\n\n` +
+                `是否允许执行？`
+              );
+              fetch('/api/confirm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ confirm_id: data.id, approved })
+              }).catch(() => {});
+            }
             else if (data.type === 'chunk') {
               if (!replySection) {
                 replySection = { type: 'reply', text: data.text };
