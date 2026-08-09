@@ -444,16 +444,25 @@ async def save_skill(name: str, body: dict):
 
 @app.get("/api/chats")
 async def list_chats(workspace: str = ""):
-    if not workspace:
-        return []
     from research_agent import project_manager as pm
-    return pm.list_chats(workspace)
+    if workspace:
+        return pm.list_chats(workspace)
+    # scan all projects for chats
+    projects = pm.list_projects()
+    all_chats = []
+    for p in projects:
+        ws = p.get("workspace_dir", "")
+        if ws:
+            chats = pm.list_chats(ws)
+            all_chats.extend(chats)
+    return all_chats
 
 
 @app.post("/api/chats")
 async def create_chat(workspace: str = "", title: str = ""):
     if not workspace:
-        raise HTTPException(400, "workspace parameter required")
+        from research_agent.config import get_data_dir
+        workspace = str(get_data_dir() / "workspaces" / "default")
     from research_agent import project_manager as pm
     chat_id = pm.create_chat(workspace, title)
     return {"chat_id": chat_id}
@@ -461,30 +470,53 @@ async def create_chat(workspace: str = "", title: str = ""):
 
 @app.get("/api/chats/{chat_id}")
 async def get_chat(chat_id: str, workspace: str = ""):
-    if not workspace:
-        raise HTTPException(400, "workspace parameter required")
     from research_agent import project_manager as pm
-    chat = pm.load_chat(workspace, chat_id)
-    if not chat:
+    if workspace:
+        chat = pm.load_chat(workspace, chat_id)
+        if chat:
+            return chat
         raise HTTPException(404, "Chat not found")
-    return chat
+    # search all projects for this chat
+    projects = pm.list_projects()
+    for p in projects:
+        ws = p.get("workspace_dir", "")
+        if ws:
+            chat = pm.load_chat(ws, chat_id)
+            if chat:
+                return chat
+    raise HTTPException(404, "Chat not found")
 
 
 @app.delete("/api/chats/{chat_id}")
 async def delete_chat(chat_id: str, workspace: str = ""):
-    if not workspace:
-        raise HTTPException(400, "workspace parameter required")
     from research_agent import project_manager as pm
-    if not pm.delete_chat(workspace, chat_id):
-        raise HTTPException(404, "Chat not found")
-    return {"status": "deleted"}
+    if workspace:
+        if not pm.delete_chat(workspace, chat_id):
+            raise HTTPException(404, "Chat not found")
+        return {"status": "deleted"}
+    projects = pm.list_projects()
+    for p in projects:
+        ws = p.get("workspace_dir", "")
+        if ws and pm.delete_chat(ws, chat_id):
+            return {"status": "deleted"}
+    raise HTTPException(404, "Chat not found")
 
 
 @app.put("/api/chats/{chat_id}")
 async def update_chat(chat_id: str, body: dict, workspace: str = ""):
-    if not workspace:
-        raise HTTPException(400, "workspace parameter required")
     from research_agent import project_manager as pm
+    if workspace:
+        pm.update_chat(workspace, chat_id, body)
+        return {"status": "ok"}
+    projects = pm.list_projects()
+    for p in projects:
+        ws = p.get("workspace_dir", "")
+        if ws:
+            chat = pm.load_chat(ws, chat_id)
+            if chat:
+                pm.update_chat(ws, chat_id, body)
+                return {"status": "ok"}
+    raise HTTPException(404, "Chat not found")
     updates = {}
     if "title" in body:
         updates["title"] = body["title"]

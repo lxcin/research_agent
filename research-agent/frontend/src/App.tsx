@@ -159,22 +159,32 @@ export default function App() {
 
   const handleSend = useCallback((text: string) => {
     let cid = currentChatIdRef.current;
+    const title = text.replace(/[，,。.!！？?\n\r].*/, '').slice(0, 20) || text.slice(0, 20);
     if (!cid) {
-      cid = generateChatId();
-      setCurrentChatId(cid);
-      setChatMetas(prev => [...prev, {
-        chat_id: cid,
-        title: text.slice(0, 30),
-        created_at: new Date().toISOString(),
-        turn_count: 0,
-        workspace_dir: DEFAULT_WORKSPACE,
-      }]);
-    } else {
-      setChatMetas(prev =>
-        prev.map(c => c.chat_id === cid && (!c.title || c.title === '新对话') ? { ...c, title: text.slice(0, 30) } : c)
-      );
+      const ws = getActiveChatWorkspace() || DEFAULT_WORKSPACE;
+      fetch(`/api/chats?workspace=${encodeURIComponent(ws)}&title=${encodeURIComponent(title)}`, { method: 'POST' })
+        .then(r => r.json())
+        .then((chat: any) => {
+          cid = chat.chat_id;
+          setCurrentChatId(cid);
+          setChatMetas(prev => [...prev, { chat_id: cid, title, created_at: new Date().toISOString(), turn_count: 0, workspace_dir: ws }]);
+          doSend(cid, text);
+        }).catch(() => {
+          cid = generateChatId();
+          setCurrentChatId(cid);
+          doSend(cid, text);
+        });
+      return;
     }
+    // Set title on first message
+    const existing = allMessages[cid];
+    if (!existing || existing.length === 0) {
+      setChatMetas(prev => prev.map(c => c.chat_id === cid ? { ...c, title } : c));
+    }
+    doSend(cid, text);
+  }, [currentChatId, allMessages]);
 
+  const doSend = useCallback((cid: string, text: string) => {
     const appendMsg = (msg: Message) => {
       setAllMessages(prev => ({ ...prev, [cid]: [...(prev[cid] || []), msg] }));
     };
