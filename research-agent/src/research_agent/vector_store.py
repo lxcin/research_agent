@@ -11,9 +11,13 @@ _EMBEDDING_AVAILABLE = None  # None=unknown, True=works, False=degraded
 
 
 def get_embedding_model():
-    global _EMBEDDING_MODEL
+    global _EMBEDDING_MODEL, _EMBEDDING_AVAILABLE
     if _EMBEDDING_MODEL is None:
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            _EMBEDDING_AVAILABLE = False
+            return None
         model_name = os.environ.get("RESEARCH_AGENT_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
         try:
             _EMBEDDING_MODEL = SentenceTransformer(model_name, local_files_only=True)
@@ -21,8 +25,7 @@ def get_embedding_model():
             try:
                 _EMBEDDING_MODEL = SentenceTransformer(model_name)
             except Exception:
-                from chromadb.utils import embedding_functions
-                _EMBEDDING_FN = embedding_functions.DefaultEmbeddingFunction()
+                _EMBEDDING_AVAILABLE = False
                 return None
     return _EMBEDDING_MODEL
 
@@ -51,13 +54,10 @@ def get_collection(name: str = "research_chunks") -> chromadb.Collection:
             try:
                 _COLLECTIONS[name] = client.create_collection(
                     name=name,
-                    embedding_function=get_embedding_function(),
-                )
-            except Exception:
-                _COLLECTIONS[name] = client.create_collection(
-                    name=name,
                     metadata={"hnsw:space": "cosine"},
                 )
+            except Exception:
+                _COLLECTIONS[name] = client.create_collection(name=name)
     return _COLLECTIONS[name]
 
 
@@ -66,6 +66,9 @@ def is_embedding_available() -> bool:
     global _EMBEDDING_AVAILABLE
     if _EMBEDDING_AVAILABLE is not None:
         return _EMBEDDING_AVAILABLE
+    model = get_embedding_model()
+    if model is None and _EMBEDDING_AVAILABLE is False:
+        return False
     try:
         coll = get_collection()
         coll.count()

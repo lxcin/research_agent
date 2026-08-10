@@ -65,7 +65,7 @@ def main():
         text_select=True,
         js_api=api,
     )
-    webview.start()
+    webview.start(gui='edgechromium', debug=True)
     sys.exit(0)
 
 
