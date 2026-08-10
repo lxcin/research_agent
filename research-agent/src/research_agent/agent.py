@@ -599,10 +599,10 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             continue
 
         # ── No tool calls → text response ──
-        # Strip tool messages for final response — DeepSeek requires strict ordering
-        clean_msgs = [m for m in messages if m["role"] in ("system", "user")]
+        # Keep tool results so LLM can reference what was done
+        clean_msgs = [m for m in messages if m["role"] in ("system", "user", "tool", "assistant")]
         clean_msgs.append({"role": "system",
-            "content": "基于以上检索结果和对话历史，回答用户问题。引用具体信息。回答使用与用户相同的语言。"})
+            "content": "基于以上工具调用结果和对话历史，用简洁的方式总结你完成了什么、结果如何。引用具体数据但不要重复完整内容。使用与用户相同的语言。"})
         clean_msgs.append({"role": "user", "content": state.user_input})
         state.final_response = _stream_response(llm, clean_msgs, on_event)
         break
