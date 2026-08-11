@@ -76,8 +76,6 @@ Phase 6: 分发与文档 (Docker + CI + SPEC/README)
 | 6.3 | 编写 SPEC.md (12节含 §A.3 §A.4) | `specs/2026-08-09-harness-spec.md` | 文档审查 |
 | 6.4 | 编写 README.md (分发+安全+架构) | `README.md` | 文档审查 |
 | 6.5 | 更新 SPEC_PROCESS.md + AGENT_LOG.md | 对应文件 | 文档审查 |
-| 6.6 | 编写 REFLECTION.md (1500-2500字) | `REFLECTION.md` | 文档审查 |
-
 ---
 
 ## 依赖关系

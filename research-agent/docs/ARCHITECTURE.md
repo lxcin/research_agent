@@ -31,19 +31,21 @@
 │  validate_response(state) → 幻觉检测                      │
 ├──────────────────────────────────────────────────────────┤
 │                    工具系统层                              │
-│  ToolRegistry (11 tools, 可插拔)                          │
-│  ┌──────┬──────┬──────┬──────┬──────┐                    │
-│  │论文层  │执行层  │文件层  │管理   │用户扩展│                  │
-│  │retrieve│shell_ │read   │check_ │my_tools/             │
-│  │search  │exec   │write  │tasks  │自动导入               │
-│  │read    │       │ edit  │       │                     │
-│  │update  │       │ glob  │       │                     │
-│  │notes   │       │ grep  │       │                     │
-│  └──────┴──────┴──────┴──────┴──────┘                    │
+│  ToolRegistry (13 tools, 可插拔)                          │
+│  ┌──────┬──────┬──────┬──────┬──────┬──────┐                    │
+│  │论文层  │执行层  │文件层  │编排层  │用户扩展│MCP │                    │
+│  │retrieve│shell_ │read   │spawn  │my_tools/│外部 │                  │
+│  │search  │exec   │write  │sub-   │自动导入  │工具 │                  │
+│  │read    │       │ edit  │agent  │         │    │                  │
+│  │update  │       │ glob  │       │         │    │                  │
+│  │notes   │       │ grep  │       │         │    │                  │
+│  │delete  │       │check_ │       │         │    │                  │
+│  │paper   │       │tasks  │       │         │    │                  │
+│  └──────┴──────┴──────┴──────┴──────┴──────┘                    │
 ├──────────────────────────────────────────────────────────┤
 │                    存储层                                  │
-│  ChromaDB (向量)  │  SQLite (结构化)  │  Filesystem (工作区) │
-│  论文全文+元数据    │  项目/对话/论文    │  代码/结果/日志      │
+│  ChromaDB (向量)  │  SQLite (论文元数据)  │  Filesystem (项目/对话/工作区) │
+│  论文全文+元数据    │  论文记录              │  代码/结果/日志/project.json  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -135,7 +137,7 @@ workspace/papers/{arxiv_id}.md  → 可读副本（Markdown）
 
 | 层 | 机制 | 确定性 |
 |------|------|------|
-| 输入验证 | `guardrail.py`: 10+ 危险模式正则 + 路径穿越拦截 | ✅ mock 可测 |
+| 输入验证 | `guardrail.py`: 12-pattern 危险正则 + 路径穿越拦截 | ✅ mock 可测 |
 | 反馈校验 | `validate.py`: 工具输出结构化校验 + 失败回灌 | ✅ mock 可测 |
 | 凭据安全 | localStorage (Web) / env (Desktop) + CI 硬编码检查 | ✅ |
 
@@ -147,15 +149,16 @@ workspace/papers/{arxiv_id}.md  → 可读副本（Markdown）
 
 ```
 用户消息 → FastAPI SSE
-  → build_context(state) → 注入分层上下文
-  → _call_llm_with_tools(messages, tools, "auto")
+  → build_context(state, registry, model_name) → 注入分层上下文
+  → _call_llm_with_retry → _call_llm_with_tools(messages, tools, "auto")
   → LLM 返回 tool_calls:
-      dispatch(name, params, llm, state, emit)
-        → guardrail(action) → 拦截? return blocked
-        → handler(params, llm, state, emit) → ToolResult
-        → validate_result(name, data) → 反馈回灌
+      对每个 tool_call:
+        → guardrail(action) → 拦截? HITL confirm_required → 60s 超时默认拒绝
+        → validate_tool_params → 参数无效则注入错误
+        → registry.dispatch(name, params, llm, state, emit) → ToolResult
         → 结果追加到 messages
-  → LLM 返回 text (无 tool_call):
-      _generate_msgs(messages) → 清理上下文
+        → file_write/file_edit: _auto_validate → py_compile/pytest/javac
+  → 无 tool_calls:
       _stream_response → token-by-token → 前端
+      _save_turn → _maybe_compress → _mark_waiting_if_needed
 ```

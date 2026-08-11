@@ -202,7 +202,7 @@ Agent 循环是一个**自实现的 ReAct-style function-calling 循环**，核�
 - `skill_loader`：从 `skills/` 目录加载 YAML frontmatter Markdown 技能文件，匹配 trigger 关键词后注入技能上下文
 
 #### Memory（memory.py + project_manager.py）
-- **存储后端**：文件系统 JSON 文件（`~/.research-agent-data/projects/{project_id}/conversations/{chat_id}.json`）
+- **存储后端**：文件系统 JSON 文件（`~/research-agent-data/projects/{project_id}/conversations/{chat_id}.json`）
 - **Workspace 隔离**：每个 workspace 对应的 chat 完全隔离，不同项目互不污染
 - **压缩机制**：当 uncompressed turns > 10 时触发 `_maybe_compress()`，LLM 将旧轮次压缩为 JSON（conclusions + dead_ends 两字段），标记对应 turn 的 `compressed=True`
 - **进度持久化**：压缩同时更新 `progress.md`（一句摘要），累积记录项目进展
@@ -219,7 +219,7 @@ Agent 循环是一个**自实现的 ReAct-style function-calling 循环**，核�
 
 - **技术栈**：React + TypeScript + Vite
 - **协议**：Server-Sent Events（SSE），单次 POST `/api/chat` 返回流式响应
-- **事件类型**：`thinking`（思考过程）、`tool_start/tool_end`（工具调用状态）、`file_change`（文件变更）、`reply`（流式文本）、`confirm_required`（HITL 确认）、`citations`（引用论文卡片）、`sources`（检索来源）
+- **事件类型**：`thinking`（思考过程）、`tool_start/tool_end`（工具调用状态）、`file_change`（文件变更）、`reply`（流式文本）、`confirm_required`（HITL 确认）、`citations`（引用论文卡片）、`sources`（检索来源）、`recall`（检索评估 Precision@k + Recall）、`done`（对话结束）、`error`（错误信息）
 - **UI 组件**：可折叠工具调用块（显示状态图标 + 输入/输出）、引用论文卡片、侧边栏项目管理、多 chat tab
 - **设置面板**：前端直接配置 API Key / model / base URL，覆盖 config.yml
 
@@ -320,7 +320,7 @@ Agent 循环是一个**自实现的 ReAct-style function-calling 循环**，核�
 | rank-bm25 | BM25 关键词检索 | 纯 Python，零外部依赖 |
 | PyMuPDF (fitz) | PDF 文本提取 | 无 |
 | tiktoken | Token 计数（cl100k_base encoding） | 粗略估算（len/4） |
-| networkx | 知识图谱构建 | 仅 V2 使用 |
+| networkx | 知识图谱构建 | 可选：图形界面 /api/graph 使用 |
 | React + TypeScript + Vite | 前端 | 需要 Node.js 构建 |
 
 ---
@@ -337,52 +337,64 @@ class AgentState:           # 运行时 agent 状态
     active_chat_id: str
     active_project: Project | None
     retrieved_chunks: list[dict]    # 检索结果
+    retrieved_context: list[dict]   # 去重后的检索上下文
+    retrieval_sufficient: bool      # 检索是否充分
+    retry_count: int                # 当前重试计数
     conversation_turns: list       # 最近对话轮次
     compressed_summaries: list[str]
     round_count: int               # 当前轮次
     errors: list[str]
     final_response: str
+    error: str                     # 最近错误信息
     confidence: str                # certain/speculative/uncertain
     citations: list[str]           # 引用 ID 列表
+    search_query: str              # 最近搜索查询
+    needs_retrieval: bool          # 是否需要检索
+    needs_compression: bool        # 是否需要压缩
+    sections: list[dict]           # 结构化章节（用于前端持久化）
     _pending_confirms: dict        # HITL 待确认项
+    _current_tool_id: str          # 当前正在执行的工具 ID
 
 @dataclass
 class Project:              # 项目/工作区
-    id: str                 # SHA256 hash of workspace_dir
-    topic: str
-    status: ProjectStatus   # ACTIVE/WAITING/PAUSED/DONE
-    progress_text: str      # 累积进度日志
-    pending_task: PendingTask | None
-    workspace_dir: str
-    created_at: str
-    updated_at: str
+    id: str | None          # SHA256 hash of workspace_dir
+    topic: str = ""
+    status: ProjectStatus = ProjectStatus.ACTIVE  # ACTIVE/WAITING/PAUSED/DONE
+    progress_text: str = ""
+    pending_task: PendingTask | None = None
+    workspace_dir: str = ""
+    created_at: str = ""
+    updated_at: str = ""
 
 @dataclass
 class ConversationTurn:     # 单轮对话
-    id: str
-    round_number: int
-    user_message: str
-    assistant_message: str
-    timestamp: str
-    compressed: bool         # 是否已压缩
-    summary: str             # 压缩摘要（JSON: conclusions + dead_ends）
+    id: str | None
+    project_id: str = ""
+    round_number: int = 0
+    user_message: str = ""
+    assistant_message: str = ""
+    timestamp: str = ""
+    compressed: bool = False  # 是否已压缩
+    summary: str = ""         # 压缩摘要（JSON: conclusions + dead_ends）
 
 @dataclass
 class Paper:                # 论文元数据（SQLite）
-    id: str
-    title: str
-    doi: str
-    year: int
-    source_score: int       # 来源评分（1-10）
-    citation_count: int
-    authors: list[str]
-    abstract: str
-    file_path: str
+    id: str | None
+    title: str = ""
+    doi: str = ""
+    year: int = 0
+    source_score: int = 5   # 来源评分（1-10）
+    citation_count: int = 0
+    authors: list[str] = field(default_factory=list)
+    abstract: str = ""
+    file_path: str = ""
 
 @dataclass
 class Action:               # Guardrail 输入
-    action: str             # 工具名称
-    query: str              # 命令/参数
+    action: str = "generate"  # 工具名称
+    query: str = ""           # 命令/参数
+    target: str = "papers"    # 目标类型
+    reasoning: str = ""       # 推理理由
 ```
 
 ### 6.2 存储分布
@@ -392,9 +404,10 @@ class Action:               # Guardrail 输入
 | Paper 元数据 | SQLite (`papers` 表) | 结构化行 |
 | Paper chunks | ChromaDB Collection (`research_chunks`) | 向量 + metadata |
 | Paper 摘要 | ChromaDB (`{paper_id}_summary`) | 向量文档 |
-| Project 配置 | File System (`project.json`) | JSON |
-| Chat 对话 | File System (`conversations/{chat_id}.json`) | JSON |
-| 项目进度 | File System (`progress.md`) | Markdown |
+| Project 配置 | File System (`~/research-agent-data/projects/{project_id}/project.json`) | JSON |
+| Chat 对话 | File System (`~/research-agent-data/projects/{project_id}/conversations/{chat_id}.json`) | JSON |
+| 项目进度 | File System (`~/research-agent-data/projects/{project_id}/progress.md`) | Markdown |
+| Workspace marker | File System (`{workspace}/.research-agent/project.json`) | JSON（指向 project_id） |
 | 知识图谱 | SQLite (`claims` / `kg_relations` 表) | 结构化行（V2） |
 | 后台任务日志 | File System (`tasks/{task_id}.log` + `.json`) | 文本 + JSON |
 
@@ -423,9 +436,9 @@ class Action:               # Guardrail 输入
 
 三层优先级：
 
-1. **环境变量**（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`）— 最高优先级
-2. **config.yml**（`~/.research-agent-data/config.yml`）— 持久化配置
-3. **前端传入**（`POST /api/chat` 的 `config.apiKey` 字段）— 会话级临时覆盖
+1. **前端传入**（`POST /api/chat` 的 `config.apiKey` 字段）— 最高优先级，会话级
+2. **环境变量**（如 `ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`）— 由 config.yml 中 `api_key_env` 字段指定
+3. **config.yml**（`~/research-agent-data/config.yml`）— 持久化配置
 
 **已知风险**：config.yml 中的 API key 以明文存储。当前优先考虑本地单用户场景，生产环境需引入加密存储。
 
@@ -617,7 +630,7 @@ class Action:               # Guardrail 输入
 | **rank-bm25** | BM25 关键词检索 | `BM25Okapi(tokenized_corpus)` |
 | **PyMuPDF** | PDF 文本提取 | `fitz.open(pdf_path)` |
 | **tiktoken** | Token 计数 | `encoding.encode(text)` |
-| **networkx** | 知识图谱（V2） | `nx.Graph()` |
+| **networkx** | 知识图谱（/api/graph） | `nx.Graph()` |
 | **FastAPI** | HTTP 服务 + SSE | `@app.post("/api/chat")` |
 | **React + Vite** | 前端渲染 | dist 静态文件 |
 
@@ -677,7 +690,7 @@ research-agent/
 │   ├── llm.py                # LLM 抽象 (LiteLLMProvider + MockLLMProvider)
 │   ├── config.py             # 配置加载 (config.yml + env)
 │   ├── server.py             # FastAPI SSE 服务
-│   ├── router.py             # 项目路由
+│   ├── router.py             # 项目路由（关键词匹配 + 中文分词）
 │   ├── knowledge_graph.py    # 知识图谱 (networkx, V2)
 │   ├── skill_loader.py       # Skill 文件加载
 │   ├── tools/

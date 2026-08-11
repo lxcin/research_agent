@@ -35,7 +35,7 @@ DEEPSEEK_API_KEY=sk-xxx
 Supported providers: DeepSeek, OpenAI, Anthropic, OpenAI-compatible.
 
 **方式三：config.yml (⚠ 明文存储风险)**
-Write the key into `src/research_agent/config.yml`. Plaintext on disk — do not use in shared environments.
+Write the key into `~/research-agent-data/config.yml`. Plaintext on disk — do not use in shared environments.
 
 **安全红线：**
 - **NEVER** hardcode API keys in source code
