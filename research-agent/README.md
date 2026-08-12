@@ -47,6 +47,13 @@ Write the key into `~/research-agent-data/config.yml`. Plaintext on disk — do 
 
 ## 分发方式 (Distribution)
 
+**CLI (命令行):**
+```bash
+pip install -e .
+research-agent chat
+```
+Or directly: `PYTHONPATH=src python -m research_agent.cli`
+
 **Docker (docker compose):**
 ```bash
 docker build -f Dockerfile.backend -t pp-backend .
@@ -62,14 +69,16 @@ PYTHONPATH=src python desktop.py
 ```
 Launches a native window with embedded webview. Requires Edge WebView2 runtime (built-in on Windows 10+).
 
-**Render.com:**
+**WebUI (Render.com):**
 Deploy via `render.yaml`, auto-detected. Set `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `LLM_API_KEY` as environment variables in the Render dashboard.
+Deployed at: [https://paperpilot.onrender.com](https://paperpilot.onrender.com)
 
-**PyInstaller:**
+**GitHub Release (可执行文件):**
 ```bash
+pip install pyinstaller
 pyinstaller paperpilot.spec
 ```
-Builds a standalone `.exe` bundling backend + frontend dist.
+Generates `dist/PaperPilot.exe` — a standalone executable bundling backend + frontend. Download from [GitHub Releases](https://github.com/lxcin/research_agent/releases).
 
 ---
 
