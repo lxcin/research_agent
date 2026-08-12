@@ -9,17 +9,27 @@ PaperPilot 是一个自实现的 ReAct 风格 Agent 循环，内置 13 个工具
 ## 快速开始 (Quick Start)
 
 ```bash
+# 安装
+pip install git+https://github.com/lxcin/research_agent.git
+
+# 或本地安装
+git clone https://github.com/lxcin/research_agent.git
+cd research_agent
+pip install -e .
+
+# 启动 CLI
+research-agent chat
+
+# 启动桌面版
+cd research-agent
 pip install -r requirements.txt
+PYTHONPATH=src python desktop.py
+
+# 启动 WebUI（可选）
 PYTHONPATH=src python -m uvicorn research_agent.server:app --host 0.0.0.0 --port 8050
 ```
 
-Open http://localhost:8050 in your browser. Optionally, build and run the frontend separately:
-
-```bash
-cd frontend && npm install && npm run dev
-```
-
-Then open http://localhost:5173 and point it at the backend.
+**依赖**: Python 3.11+, Edge WebView2 (Windows 10+ 内置)
 
 ---
 
@@ -47,38 +57,12 @@ Write the key into `~/research-agent-data/config.yml`. Plaintext on disk — do 
 
 ## 分发方式 (Distribution)
 
-**CLI (命令行):**
-```bash
-pip install -e .
-research-agent chat
-```
-Or directly: `PYTHONPATH=src python -m research_agent.cli`
-
-**Docker (docker compose):**
-```bash
-docker build -f Dockerfile.backend -t pp-backend .
-docker build -f Dockerfile.frontend -t pp-frontend .
-docker compose up
-```
-Backend on :8050, frontend on :5173 (nginx port 80 in container).
-
-**Desktop App (pywebview):**
-```bash
-cd frontend && npm run build
-PYTHONPATH=src python desktop.py
-```
-Launches a native window with embedded webview. Requires Edge WebView2 runtime (built-in on Windows 10+).
-
-**WebUI (Render.com):**
-Deploy via `render.yaml`, auto-detected. Set `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `LLM_API_KEY` as environment variables in the Render dashboard.
-Deployed at: [https://paperpilot.onrender.com](https://paperpilot.onrender.com)
-
-**GitHub Release (可执行文件):**
-```bash
-pip install pyinstaller
-pyinstaller paperpilot.spec
-```
-Generates `dist/PaperPilot.exe` — a standalone executable bundling backend + frontend. Download from [GitHub Releases](https://github.com/lxcin/research_agent/releases).
+| 形态 | 命令 | 说明 |
+|------|------|------|
+| **CLI** | `pip install git+https://github.com/lxcin/research_agent.git` → `research-agent chat` | 命令行交互 |
+| **Desktop** | `PYTHONPATH=src python desktop.py` | pywebview 原生窗口 |
+| **Docker** | `docker compose up` | 后端 :8050 + 前端 :5173 |
+| **源码** | [GitHub Release](https://github.com/lxcin/research_agent/releases) | 下载 `v3.0.0` 源码 zip |
 
 ---
 
