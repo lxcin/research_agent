@@ -1,11 +1,13 @@
-# tests/test_ingestion.py
+# tests/test_ingestion.py — deterministic text-processing helpers (no vector store)
+#
+# Vector chunk embedding / source-merge helpers were retired in V4 (grep mode);
+# the remaining helpers are pure text logic and stay unit-tested here.
+
 from research_agent.ingestion import (
     _clean_text, _chunk_text_with_sections, _should_accept,
-    _detect_and_merge_sources, recall_full_paper, deduplicate_by_title,
+    deduplicate_by_title,
 )
 from research_agent.models import Paper
-from research_agent.store import init_db, insert_paper
-from research_agent.vector_store import add_chunks
 
 
 def test_clean_text_removes_headers():
@@ -56,44 +58,23 @@ def test_should_reject_no_source():
     assert ok is False
 
 
-def test_recall_full_paper(temp_data_dir):
-    from research_agent.vector_store import get_collection
-    pid = "full_recall_test"
-    add_chunks(pid, [
-        {"chunk_index": 0, "text": "First paragraph."},
-        {"chunk_index": 1, "text": "Second paragraph."},
-    ])
-    full = recall_full_paper(pid)
-    assert "First paragraph" in full
-    assert "Second paragraph" in full
+def test_deduplicate_by_title_exact(temp_data_dir):
+    p = Paper(id="dup_1", title="Attention Is All You Need", doi="10.1/x",
+              year=2017, source_score=9, citation_count=10)
+    from research_agent.store import insert_paper, init_db
+    init_db()
+    insert_paper(p)
+    hit = deduplicate_by_title("Attention Is All You Need")
+    assert hit is not None
+    assert hit.id == "dup_1"
 
 
-def test_detect_and_merge_sources_agree(temp_data_dir):
-    from unittest.mock import patch, MagicMock
-    import json
-    import litellm
-    from research_agent.vector_store import get_collection
-
-    pid_existing = "paper_existing"
-    pid_new = "paper_new"
-    add_chunks(pid_existing, [
-        {"chunk_index": 0, "text": "The temperature increase of 10C shifts retention time by 0.3 min in HPLC analysis."},
-    ])
-    add_chunks(pid_new, [
-        {"chunk_index": 0, "text": "In HPLC, a 10C temperature rise causes retention time to shift forward by approximately 0.3 min."},
-    ])
-
-    with patch("research_agent.ingestion.litellm.completion") as mock_llm:
-        mock_llm.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content='{"relation": "agree", "explanation": "Both state same quantitative relationship"}'))]
-        )
-        _detect_and_merge_sources(pid_new, [
-            {"chunk_index": 0, "text": "In HPLC, a 10C temperature rise causes retention time to shift forward by approximately 0.3 min."}
-        ])
-
-    coll = get_collection()
-    result = coll.get(ids=[f"{pid_existing}_chunk_0"])
-    assert result["metadatas"]
-    sources_raw = result["metadatas"][0].get("verified_sources", "[]")
-    sources = json.loads(sources_raw) if isinstance(sources_raw, str) else sources_raw
-    assert any(s["paper_id"] == pid_new for s in sources)
+def test_deduplicate_by_title_fuzzy(temp_data_dir):
+    p = Paper(id="dup_2", title="A Study of Neural Attention Mechanisms", doi="10.1/y",
+              year=2020, source_score=9, citation_count=10)
+    from research_agent.store import insert_paper, init_db
+    init_db()
+    insert_paper(p)
+    hit = deduplicate_by_title("A study of neural attention mechanism")
+    assert hit is not None
+    assert hit.id == "dup_2"

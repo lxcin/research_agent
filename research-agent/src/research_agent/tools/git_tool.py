@@ -57,6 +57,8 @@ def git_init(project_dir: str | Path) -> dict:
                 "*.egg-info/\n"
                 "build/\n"
                 "dist/\n"
+                # Staging zone for un-persisted papers — never commit temp reads
+                ".research-agent/tmp/\n"
             )
     return {"success": True}
 

@@ -1,95 +1,59 @@
-"""Built-in tools: local retrieval and arXiv search."""
+"""Built-in research tools (Tier A, grep mode).
+
+Local retrieval is keyword/grep over workspace/papers/*.md (formal zone).
+read_paper uses a two-phase landing: read into an isolated staging zone first;
+only read_paper(paper_id, persist=True) promotes staging → formal so it becomes
+grep-able long-term. No vector store / Chroma involved.
+"""
 import os
+
 from research_agent.tools.schema import ToolSchema, ToolResult
-from research_agent.retrieval import hybrid_search, build_bm25_index
-from research_agent.ingestion import ingest_text, deduplicate_by_title
+from research_agent.retrieval import grep_papers
+from research_agent import paper_store
 
 
-def _save_paper_workspace(state, meta: dict, paper):
-    """Save paper markdown to workspace papers/ directory."""
-    try:
-        from research_agent.tools.builtin.filesystem import _get_project_dir
-        ws = _get_project_dir(state)
-        papers_dir = os.path.join(ws, "papers")
-        if not os.path.exists(papers_dir):
-            os.makedirs(papers_dir)
-        safe_name = meta.get("arxiv_id", paper.id).replace("/", "_").replace("\\", "_")
-        md_path = os.path.join(papers_dir, f"{safe_name}.md")
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(
-                f"# {meta.get('title', '')}\n\n"
-                f"**Authors**: {', '.join(meta.get('authors', []))}\n"
-                f"**Year**: {meta.get('year', '')}\n"
-                f"**arXiv**: {meta.get('arxiv_id', '')}\n\n"
-                f"## Abstract\n{meta.get('abstract', '')}\n"
-            )
-    except Exception:
-        pass
+def _workspace(state) -> str:
+    from research_agent.tools.builtin.filesystem import _get_project_dir
+    return _get_project_dir(state)
 
 
-def _link_to_project(state, paper):
-    """Link ingested paper to active project."""
-    try:
-        pid_obj = getattr(state, 'active_project', None)
-        project_id = None
-        if pid_obj and getattr(pid_obj, 'id', None):
-            project_id = pid_obj.id
-        else:
-            ws = getattr(state, 'workspace_dir', '')
-            if ws:
-                from research_agent.project_manager import get_project_id
-                project_id = get_project_id(ws)
-        if project_id:
-            from research_agent.store import link_paper_to_project
-            link_paper_to_project(paper.id, project_id)
-    except Exception:
-        pass
-
+# ── retrieve: keyword/grep over formal papers ───────────────────────────────
 
 def _handle_retrieve(params: dict, llm, state, emit) -> ToolResult:
     query = params.get("query", "")
     if not query.strip():
         return ToolResult.fail("Missing query parameter")
 
-    pid = getattr(state, 'active_project', None)
-    project_id = getattr(pid, 'id', None) if pid else None
-    if not project_id:
-        ws = getattr(state, 'workspace_dir', '')
-        if ws:
-            from research_agent.project_manager import get_project_id
-            project_id = get_project_id(ws)
-
     emit("tool", {"tool": "retrieve", "status": "start", "query": query})
-    build_bm25_index()
-    results = hybrid_search(query, n_results=5, project_id=project_id)
+    papers_dir = paper_store.formal_papers_dir(_workspace(state))
+    results = grep_papers(query, papers_dir, n_results=5)
 
     if results:
-        emit("tool", {"tool": "retrieve", "status": "done", "chunks": len(results)})
-        paper_ids = list({c.get("paper_id", "") for c in results if c.get("paper_id")})
-        # Extract title/snippet per chunk so LLM can decide which papers to read
-        items = []
-        seen = set()
-        for c in results:
-            pid = c.get("paper_id", "")
-            if not pid or pid in seen:
-                continue
-            seen.add(pid)
-            items.append({
-                "paper_id": pid,
-                "text_snippet": c.get("text", "")[:200],
-            })
+        emit("tool", {"tool": "retrieve", "status": "done", "count": len(results)})
+        paper_ids = [r.get("paper_id", "") for r in results if r.get("paper_id")]
+        items = [
+            {
+                "paper_id": r.get("paper_id", ""),
+                "title": r.get("title", ""),
+                "text_snippet": r.get("text", "")[:300],
+            }
+            for r in results
+        ]
         return ToolResult(success=True, chunks=results, data={
             "found": len(results), "source": "local",
             "paper_ids": paper_ids, "items": items,
         })
 
     emit("tool", {"tool": "retrieve", "status": "local_empty", "query": query})
-    return ToolResult(success=False, data={"found": 0, "source": "local"})
+    return ToolResult(success=False, data={
+        "found": 0, "source": "local",
+        "hint": "本地正式区无匹配。可用 search_papers 搜 arXiv；或用 read_paper(paper_id, persist=true) 落地后再检索。",
+    })
 
+
+# ── search_papers: arXiv metadata only (never lands files) ──────────────────
 
 def _handle_search(params: dict, llm, state, emit) -> ToolResult:
-    """Search arXiv for papers. Returns metadata only — no auto-ingestion.
-    LLM must call read_paper to ingest specific papers into the knowledge base."""
     query = params.get("query", "")
     if not query.strip():
         return ToolResult.fail("Missing query parameter")
@@ -129,8 +93,6 @@ def _handle_search(params: dict, llm, state, emit) -> ToolResult:
         except Exception:
             pass
 
-    # Return search results as data — NO ingestion
-    # LLM decides which papers to read; read_paper handles ingestion
     results = []
     for p in papers:
         results.append({
@@ -142,7 +104,6 @@ def _handle_search(params: dict, llm, state, emit) -> ToolResult:
             "source": "arxiv",
         })
 
-    # Format as readable text for tool result message (LLM sees this)
     readable = []
     for i, r in enumerate(results):
         readable.append(
@@ -151,188 +112,182 @@ def _handle_search(params: dict, llm, state, emit) -> ToolResult:
             f"    {r['abstract']}"
         )
     result_text = "检索到以下论文:\n\n" + "\n\n".join(readable)
-    result_text += f"\n\n下一步: 选择一篇论文，用 read_paper(paper_id=\"{results[0]['paper_id'] if results else ''}\") 读全文。不要用 retrieve——retrieve 搜本地，搜不到刚找到的 arXiv 论文。"
+    first_pid = results[0]['paper_id'] if results else ''
+    result_text += (
+        f"\n\n下一步: 选中论文后用 read_paper(paper_id=\"{first_pid}\") 读全文。"
+        f"默认只读入临时区（不持久化）；确认论文有用后，再调用 "
+        f"read_paper(paper_id=\"{first_pid}\", persist=true) 正式落地，之后可用 retrieve 搜到。"
+    )
 
     return ToolResult.ok(
         found=len(results),
         papers=results,
         _formatted=result_text,
-        hint="用 read_paper(paper_id=\"...\") 读全文，不用 retrieve",
+        hint=f"用 read_paper(paper_id=\"{first_pid}\") 读全文；确认有用后加 persist=true 落地",
     )
 
 
-retrieve_tool = ToolSchema(
-    name="retrieve",
-    description=(
-        "搜索本地知识库中已读过的论文。仅搜本地，不搜互联网。"
-        "如果 found=0 或结果不足，改用 search_papers 去 arXiv 搜索。"
-        "注意：search_papers 返回的论文不在本地，不能用 retrieve 找——直接用 read_paper(paper_id) 读。"
-    ),
-    parameters={"type": "object", "properties": {"query": {"type": "string", "description": "搜索关键词"}}, "required": ["query"]},
-    handler=_handle_retrieve, category="builtin",
-)
+# ── read_paper: two-phase landing (staging → formal) ────────────────────────
 
-search_tool = ToolSchema(
-    name="search_papers",
-    description=(
-        "在 arXiv 搜索最新论文，返回摘要列表（不自动存入本地）。"
-        "找到论文后，直接用 read_paper(paper_id='...') 读取全文——不要用 retrieve。"
-        "每次运行最多调用 2 次。"
-    ),
-    parameters={"type": "object", "properties": {"query": {"type": "string", "description": "英文搜索关键词"}}, "required": ["query"]},
-    handler=_handle_search, category="builtin",
-)
+def _meta_from_result(paper_id: str, meta: dict | None) -> dict:
+    return {
+        "id": paper_id,
+        "title": (meta or {}).get("title", ""),
+        "authors": (meta or {}).get("authors", []),
+        "year": (meta or {}).get("year", 0),
+        "abstract": (meta or {}).get("abstract", ""),
+        "doi": (meta or {}).get("doi", f"arxiv:{paper_id}"),
+        "source": (meta or {}).get("source", "arxiv"),
+    }
+
+
+def _read_local_md(path: str) -> dict | None:
+    return paper_store.read_md(path)
 
 
 def _handle_read_paper(params: dict, llm, state, emit) -> ToolResult:
-    from research_agent.ingestion import recall_full_paper, ingest_text, deduplicate_by_title
     pid = params.get("paper_id", "")
+    persist = bool(params.get("persist", False))
     if not pid:
         return ToolResult.fail("Missing paper_id")
 
-    emit("tool", {"tool": "read_paper", "status": "start", "paper_id": pid})
+    ws = _workspace(state)
+    emit("tool", {"tool": "read_paper", "status": "start", "paper_id": pid,
+                  "persist": persist})
 
-    # 1. Try existing full text from ChromaDB (idempotent)
-    text = recall_full_paper(pid)
-    if text:
-        emit("tool", {"tool": "read_paper", "status": "found", "paper_id": pid})
-        return _build_read_result(pid, text, state, "全文 (本地)")
+    # 1. Formal zone already has it → return (idempotent).
+    formal = _read_local_md(paper_store.formal_path(ws, pid))
+    if formal:
+        emit("tool", {"tool": "read_paper", "status": "found", "zone": "formal",
+                      "paper_id": pid})
+        _note_read(state, ws, pid, formal, persisted=True)
+        return _build_read_result(pid, formal, ws, "正式库")
 
-    # 2. Fetch metadata + abstract from arXiv (fast, synchronous)
+    # 2. Staging zone has it → promote if persist=True, else read-only temp.
+    staged = _read_local_md(paper_store.staging_path(ws, pid))
+    if staged:
+        if persist:
+            promoted = paper_store.promote_to_formal(ws, pid)
+            if promoted:
+                formal = _read_local_md(promoted)
+                emit("tool", {"tool": "read_paper", "status": "promoted",
+                              "paper_id": pid, "to": "formal"})
+                _note_read(state, ws, pid, formal or staged, persisted=True)
+                return _build_read_result(pid, formal or staged, ws, "正式库(已晋升)")
+            return ToolResult.fail("无法晋升到正式区")
+        emit("tool", {"tool": "read_paper", "status": "found", "zone": "staging",
+                      "paper_id": pid})
+        return _build_read_result(pid, staged, ws, "临时区(未持久化)",
+                                  hint="确认有用请调用 read_paper(paper_id, persist=true) 正式落地")
+
+    # 3. Not local → fetch metadata + full text from arXiv, land into zone.
     emit("tool", {"tool": "read_paper", "status": "fetching", "paper_id": pid})
     try:
         from research_agent.search import get_paper_metadata
         meta = get_paper_metadata(pid, id_type="arxiv")
-        if not meta or not meta.get("abstract"):
-            return ToolResult.fail(f"Cannot fetch paper: {pid}")
     except Exception as e:
+        meta = None
         return ToolResult.fail(f"Failed to fetch metadata: {e}")
+    if not meta:
+        return ToolResult.fail(f"Cannot fetch paper: {pid}（本地无此论文，且 arXiv 无法解析该 ID）")
 
-    title = meta.get("title", "")
-    abstract = meta.get("abstract", "")
+    from research_agent.tools.arxiv_pdf import fetch_pdf_text
+    full_text, err = fetch_pdf_text(pid)
+    text = full_text or (meta.get("abstract") or "")
+    if not text:
+        return ToolResult.fail(f"PDF 全文与摘要均为空: {err or 'unknown'}")
+    if not full_text:
+        emit("tool", {"tool": "read_paper", "status": "abstract_only",
+                      "paper_id": pid, "reason": err or "PDF unavailable"})
 
-    # 3. Check dedup, then ingest abstract immediately
-    existing = deduplicate_by_title(title)
-    if existing:
-        text = recall_full_paper(existing.id) or abstract
+    zone = "formal" if persist else "staging"
+    mm = _meta_from_result(pid, meta)
+    body = text if full_text else f"{meta.get('abstract', '')}\n\n[注] 完整 PDF 未能获取，仅摘要可用。"
+    if persist:
+        path = paper_store.write_md(paper_store.formal_path(ws, pid), mm, body)
+        emitted = {"tool": "read_paper", "status": "ingested", "paper_id": pid, "zone": "formal"}
     else:
-        ingest_body = (
-            f"Title: {title}\n"
-            f"Authors: {', '.join(meta.get('authors', []))}\n"
-            f"Year: {meta.get('year', '')}\n\n"
-            f"Abstract: {abstract}"
-        )
-        paper, msg = ingest_text(
-            text=ingest_body, title=title,
-            doi=f"arxiv:{meta.get('arxiv_id', pid)}",
-            year=meta.get("year", 0), authors=meta.get("authors", []),
-            abstract=abstract,
-        )
-        if paper:
-            emit("tool", {"tool": "ingest", "status": "abstract_ingested", "title": title[:80]})
-            _save_paper_workspace(state, meta, paper)
-            _link_to_project(state, paper)
-            safe_name = meta.get("arxiv_id", pid).replace("/", "_").replace("\\", "_")
-            emit("file_change", {"tool_id": getattr(state, '_current_tool_id', 'unknown'), "path": f"papers/{safe_name}.md", "action": "create", "diff": f"+ {title}"})
-        text = ingest_body
+        path = paper_store.write_md(paper_store.staging_path(ws, pid), mm, body)
+        emitted = {"tool": "read_paper", "status": "staged", "paper_id": pid,
+                   "zone": "staging",
+                   "hint": "未持久化。确认有用后调用 read_paper(paper_id, persist=true)"}
+    emit("tool", emitted)
+    entry = _read_local_md(path)
+    _note_read(state, ws, pid, entry or {"meta": mm, "text": body}, persisted=persist)
+    if persist:
+        emit("file_change", {"tool_id": getattr(state, '_current_tool_id', 'unknown'),
+                             "path": f"papers/{os.path.basename(path)}", "action": "create"})
+    return _build_read_result(pid, entry or {"meta": mm, "text": body}, ws,
+                              "正式库(已下载全文)" if persist else
+                              ("临时区(摘要,PDF不可用)" if not full_text else "临时区(已下载全文)"),
+                              hint=None if persist else "确认有用请调 read_paper(paper_id, persist=true) 正式落地")
 
-    # 4. Kick off async PDF download for full text
-    emit("tool", {"tool": "read_paper", "status": "pdf_downloading",
-           "hint": "PDF downloading in background, available next read"})
+
+def _note_read(state, ws: str, pid: str, entry: dict, persisted: bool):
+    """Only persisted reads become a project note (avoid polluting on temp reads)."""
+    if not persisted:
+        return
     try:
-        import json as _json
-        def _on_pdf_done(full_text):
-            emit("tool", {"tool": "read_paper", "status": "pdf_ready",
-                   "hint": f"PDF fully ingested for {pid}"})
-
-        from research_agent.tools.arxiv_pdf import ingest_arxiv_async
-        ingest_arxiv_async(pid, meta, on_done=_on_pdf_done)
+        proj = getattr(state, 'active_project', None)
+        title = (entry.get("meta") or {}).get("title", "") or pid
+        year = (entry.get("meta") or {}).get("year", 0)
+        note_entry = f"[read] {title} ({year})"
+        existing = proj.progress_text or ""
+        proj.progress_text = existing + "\n" + note_entry if existing else note_entry
+        if ws:
+            from research_agent import project_manager as pm
+            pm.update_progress(ws, proj.progress_text)
     except Exception:
         pass
 
-    return _build_read_result(pid, text, state, f"摘要 (PDF下载中，下次阅读可得全文)")
 
-
-def _build_read_result(pid: str, text: str, state, source: str = "") -> ToolResult:
-    """Build read_paper ToolResult with metadata lookup."""
+def _build_read_result(pid: str, entry: dict, ws: str, source: str = "",
+                       hint: str | None = None) -> ToolResult:
+    """Build read_paper ToolResult from a paper md entry."""
+    meta = entry.get("meta") or {}
+    text = entry.get("text") or ""
     if not text:
         text = "(empty)"
-    words = text.split()
-    truncated = " ".join(words[:4000]) if len(words) > 4000 else text
+    truncated = text[:30000]
 
-    title = ""; authors = []; year = 0; doi = ""
-    try:
-        from research_agent.vector_store import get_collection
-        coll = get_collection()
-        result = coll.get(ids=[f"{pid}_summary"])
-        if result and result["metadatas"]:
-            m = result["metadatas"][0]
-            title = m.get("title", "")
-            authors_str = m.get("authors", "")
-            authors = [a.strip() for a in authors_str.split(",")] if authors_str else []
-            year = m.get("year", 0)
-            doi = m.get("doi", "")
-    except Exception:
-        pass
-
-    # Auto-save note
-    try:
-        ws = getattr(state, 'workspace_dir', '')
-        proj = getattr(state, 'active_project', None)
-        if proj:
-            note_entry = f"[read] {title[:80] or pid} ({year})"
-            existing = proj.progress_text or ""
-            proj.progress_text = existing + "\n" + note_entry if existing else note_entry
-            if ws:
-                from research_agent import project_manager as pm
-                pm.update_progress(ws, proj.progress_text)
-    except Exception:
-        pass
-
-    return ToolResult.ok(
-        paper_id=pid, title=title, authors=authors[:5], year=year, doi=doi,
-        full_text=truncated, length=len(truncated),
-        source=source,
-    )
+    data = {
+        "paper_id": pid,
+        "title": meta.get("title", ""),
+        "authors": (meta.get("authors") or [])[:5],
+        "year": meta.get("year", 0),
+        "doi": meta.get("doi", ""),
+        "full_text": truncated,
+        "length": len(truncated),
+        "source": source,
+        "persisted": source.startswith("正式") or source == "正式库",
+    }
+    if hint:
+        data["hint"] = hint
+    return ToolResult.ok(**data)
 
 
-read_paper_tool = ToolSchema(
-    name="read_paper",
-    description=(
-        "读论文全文。传入 search_papers 返回的 arXiv ID，或 retrieve 查到的本地 ID 都可以。"
-        "首次读取时自动下载 PDF 全文并摄入本地知识库，后续可被 retrieve 找到。"
-    ),
-    parameters={"type": "object", "properties": {"paper_id": {"type": "string", "description": "论文 ID（arXiv ID 或本地 ID）"}}, "required": ["paper_id"]},
-    handler=_handle_read_paper, category="builtin",
-)
-
+# ── delete_paper / update_notes ─────────────────────────────────────────────
 
 def _handle_delete_paper(params: dict, llm, state, emit) -> ToolResult:
-    """Delete a paper from the knowledge base."""
     pid = params.get("paper_id", "")
     if not pid:
         return ToolResult.fail("Missing paper_id")
-    from research_agent.tools.arxiv_pdf import delete_paper_from_kb
-    ok = delete_paper_from_kb(pid)
-    if ok:
-        return ToolResult.ok(deleted=pid, message="Paper removed from knowledge base")
-    return ToolResult.fail(f"Failed to delete paper: {pid}")
-
-
-delete_paper_tool = ToolSchema(
-    name="delete_paper",
-    description="从知识库中删除一篇论文（ChromaDB + SQLite + 工作区）。",
-    parameters={"type": "object", "properties": {"paper_id": {"type": "string", "description": "论文 ID"}}, "required": ["paper_id"]},
-    handler=_handle_delete_paper, category="builtin",
-)
+    from research_agent.tools.arxiv_pdf import delete_paper_files
+    removed = delete_paper_files(_workspace(state), pid)
+    if removed:
+        emit("tool", {"tool": "delete_paper", "status": "done", "paper_id": pid})
+        return ToolResult.ok(deleted=pid, message="已删除正式/临时论文文件")
+    return ToolResult.fail(f"本地没有这篇论文: {pid}")
 
 
 def _handle_update_notes(params: dict, llm, state, emit) -> ToolResult:
     notes = params.get("notes", "")
-    if not notes.strip(): return ToolResult.fail("Missing notes")
+    if not notes.strip():
+        return ToolResult.fail("Missing notes")
     from research_agent import project_manager as pm
     proj = getattr(state, 'active_project', None)
-    if not proj: return ToolResult.fail("No active project")
+    if not proj:
+        return ToolResult.fail("No active project")
     ws = getattr(state, 'workspace_dir', '')
     from datetime import datetime
     ts = datetime.now().strftime("%H:%M")
@@ -344,9 +299,67 @@ def _handle_update_notes(params: dict, llm, state, emit) -> ToolResult:
     return ToolResult.ok(entry=f"[{ts}] {notes}", count=new_notes.count("\n") + 1)
 
 
+# ── Tool Definitions ────────────────────────────────────────────────────────
+
+retrieve_tool = ToolSchema(
+    name="retrieve",
+    description=(
+        "搜索本地正式论文库（workspace/papers/*.md），关键词/grep 匹配。"
+        "仅搜已持久化论文，不搜互联网。如果 found=0，改用 search_papers 去 arXiv 搜索。"
+        "注意：search_papers 返回的论文尚未落地，不能用 retrieve 找——先 read_paper 读，"
+        "确认有用后 read_paper(persist=true) 落地才能被 retrieve 检索到。"
+    ),
+    parameters={"type": "object",
+                "properties": {"query": {"type": "string", "description": "搜索关键词"}},
+                "required": ["query"]},
+    handler=_handle_retrieve, category="builtin",
+)
+
+search_tool = ToolSchema(
+    name="search_papers",
+    description=(
+        "在 arXiv 搜索最新论文，返回标题+摘要列表（只搜不落地，不写任何文件）。"
+        "找到论文后用 read_paper(paper_id='...') 读全文；确认有用后再以 "
+        "read_paper(paper_id='...', persist=true) 正式落地。每次运行最多调用 2 次。"
+    ),
+    parameters={"type": "object",
+                "properties": {"query": {"type": "string", "description": "英文搜索关键词"}},
+                "required": ["query"]},
+    handler=_handle_search, category="builtin",
+)
+
+read_paper_tool = ToolSchema(
+    name="read_paper",
+    description=(
+        "读论文全文。传入 search_papers 返回的 arXiv ID。"
+        "默认(persist=false)只下载到隔离临时区读取，不持久化、不被 retrieve 检索到；"
+        "只有当论文确认有用后，再次调用 read_paper(paper_id, persist=true) 才会正式落地到本地，之后可被 retrieve 搜到。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "paper_id": {"type": "string", "description": "论文 ID（arXiv ID）"},
+            "persist": {"type": "boolean",
+                        "description": "是否正式落地。true=晋升为本地正式论文(可被 retrieve 检索)；默认 false=仅临时读取"},
+        },
+        "required": ["paper_id"],
+    },
+    handler=_handle_read_paper, category="builtin",
+)
+
+delete_paper_tool = ToolSchema(
+    name="delete_paper",
+    description="删除本地论文（正式区 + 临时区文件）。",
+    parameters={"type": "object",
+                "properties": {"paper_id": {"type": "string", "description": "论文 ID"}},
+                "required": ["paper_id"]},
+    handler=_handle_delete_paper, category="builtin",
+)
+
 update_notes_tool = ToolSchema(
     name="update_notes",
     description="记录研究发现、修正之前的理解。每次实验或阅读后有值得记录的结论时主动调用。",
-    parameters={"type": "object", "properties": {"notes": {"type": "string", "description": "笔记内容"}}, "required": ["notes"]},
+    parameters={"type": "object", "properties": {"notes": {"type": "string", "description": "笔记内容"}},
+                "required": ["notes"]},
     handler=_handle_update_notes, category="builtin",
 )

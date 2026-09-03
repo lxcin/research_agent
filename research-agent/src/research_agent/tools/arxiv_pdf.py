@@ -1,11 +1,17 @@
-"""arXiv PDF download and ingestion — full paper text pipeline."""
+"""arXiv PDF download and text extraction — Tier A grep mode (no vector store).
+
+Downloads an arXiv PDF, extracts plain text with pymupdf, and (via the caller)
+lands it into a paper .md staging/formal file. No Chroma/ingestion involvement.
+"""
 import logging
 import tempfile
 import httpx
 import os
 import re
-import threading
+import pymupdf
 from pathlib import Path
+
+from research_agent import paper_store
 
 logger = logging.getLogger(__name__)
 
@@ -36,34 +42,27 @@ def download_arxiv_pdf(arxiv_id: str, timeout: int = 60) -> Path | None:
         return None
 
 
-def ingest_arxiv_pdf(arxiv_id: str, meta: dict | None = None) -> tuple[str | None, str]:
-    """Download and ingest an arXiv paper's PDF. Returns (full_text, error).
-    Uses existing ingest_pdf pipeline from ingestion.py."""
-    from research_agent.ingestion import ingest_pdf
-    pdf_path = download_arxiv_pdf(arxiv_id)
+def extract_pdf_text(pdf_path: str, max_pages: int = 50) -> str:
+    """Extract plain text from a PDF file with pymupdf."""
+    doc = pymupdf.open(pdf_path)
+    text = ""
+    for i in range(min(len(doc), max_pages)):
+        text += doc.load_page(i).get_text() + "\n"
+    doc.close()
+    return text.strip()
+
+
+def fetch_pdf_text(arxiv_id: str, timeout: int = 90) -> tuple[str | None, str]:
+    """Download + extract an arXiv paper's full text.
+    Returns (full_text, error). full_text is None when download/parse fails."""
+    pdf_path = download_arxiv_pdf(arxiv_id, timeout=timeout)
     if not pdf_path:
         return None, "PDF download failed or not available"
-
     try:
-        paper, msg = ingest_pdf(str(pdf_path))
-        if paper:
-            # Update paper metadata from arXiv if available
-            if meta:
-                from research_agent.store import insert_paper, get_paper
-                existing = get_paper(paper.id)
-                if existing:
-                    existing.title = meta.get("title", existing.title)
-                    existing.authors = meta.get("authors", existing.authors)
-                    existing.year = meta.get("year", existing.year)
-                    existing.doi = f"arxiv:{arxiv_id}"
-                    insert_paper(existing)
-            # Return full text from ChromaDB
-            from research_agent.ingestion import recall_full_paper
-            full_text = recall_full_paper(paper.id)
-            return full_text or "", ""
-        return None, msg
+        text = extract_pdf_text(str(pdf_path))
+        return (text, "") if text else (None, "PDF parsed to empty text")
     except Exception as e:
-        return None, str(e)
+        return None, f"PDF parse failed: {e}"
     finally:
         try:
             os.unlink(pdf_path)
@@ -71,34 +70,16 @@ def ingest_arxiv_pdf(arxiv_id: str, meta: dict | None = None) -> tuple[str | Non
             pass
 
 
-def ingest_arxiv_async(arxiv_id: str, meta: dict | None = None,
-                       on_done=None, on_error=None):
-    """Download and ingest arXiv PDF in background thread. Calls on_done(text) or on_error(msg)."""
-    def _worker():
+def delete_paper_files(workspace_dir: str, paper_id: str) -> bool:
+    """Remove a paper from formal + staging md zones. Returns True if any removed."""
+    removed = False
+    formal = paper_store.formal_path(workspace_dir, paper_id)
+    if os.path.isfile(formal):
         try:
-            text, error = ingest_arxiv_pdf(arxiv_id, meta)
-            if text and on_done:
-                on_done(text)
-            elif on_error:
-                on_error(error or "Unknown error")
-        except Exception as e:
-            if on_error:
-                on_error(str(e))
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-
-
-def delete_paper_from_kb(paper_id: str) -> bool:
-    """Remove a paper from ChromaDB + SQLite + workspace. Returns success."""
-    try:
-        from research_agent.vector_store import delete_paper as vec_delete
-        vec_delete(paper_id)
-    except Exception:
-        pass
-    try:
-        from research_agent.store import delete_paper as db_delete
-        db_delete(paper_id)
-    except Exception:
-        return False
-    return True
+            os.unlink(formal)
+            removed = True
+        except OSError:
+            pass
+    if paper_store.discard_staging(workspace_dir, paper_id):
+        removed = True
+    return removed
