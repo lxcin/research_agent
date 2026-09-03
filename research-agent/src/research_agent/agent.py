@@ -12,7 +12,7 @@ from typing import Callable
 from research_agent.models import AgentState, Project, ProjectStatus, ConversationTurn, PendingTask, Action
 from research_agent.llm import LLMProvider
 from research_agent.context import build_context
-from research_agent.retrieval import hybrid_search, build_bm25_index
+from research_agent.retrieval import is_vector_available
 from research_agent.memory import store_turn, get_recent_turns, count_uncompressed_turns, mark_compressed
 from research_agent.store import init_db
 from research_agent.router import extract_project_topic
@@ -567,7 +567,8 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
                             consecutive_retrieve_few += 1
                         else:
                             consecutive_retrieve_few = 0
-                        if llm:
+                        # P/R instrumentation was tied to vector RAG (retired in V4).
+                        if llm and is_vector_available():
                             try:
                                 _evaluate_retrieval(llm, tc["params"].get("query", ""), result.chunks, on_event)
                             except Exception:
@@ -615,6 +616,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     state = validate_response(state)
     _save_turn(state, workspace_dir, chat_id)
     _maybe_compress(workspace_dir, chat_id, llm)
+    _maybe_distill(state, workspace_dir, chat_id, llm)
     _mark_waiting_if_needed(state)
     return state
 
@@ -623,6 +625,33 @@ def _save_turn(state: AgentState, workspace_dir: str, chat_id: str):
     round_num = len(state.conversation_turns) + 1 if hasattr(state, 'conversation_turns') else 1
     store_turn(workspace_dir, chat_id, round_num, state.user_input, state.final_response or "",
                sections=getattr(state, 'sections', None))
+
+
+def _maybe_distill(state: AgentState, workspace_dir: str, chat_id: str, llm: LLMProvider):
+    """Submit this turn's conversation-only content to the Tier B pipeline.
+
+    Runs after the turn is persisted; non-blocking background distillation.
+    Skipped when memory.enabled=false or the response carried tool traces.
+    """
+    if not workspace_dir or not chat_id:
+        return
+    try:
+        from research_agent.memory import source as mem_source
+        from research_agent.memory import pipeline as mem_pipeline
+        from research_agent.config import get_memory_config
+        if not get_memory_config().get("enabled", True):
+            return
+        snap = mem_source.build_extraction_source(workspace_dir, chat_id)
+        if not snap["has_content"]:
+            return
+        src = {}
+        if state.active_project and getattr(state.active_project, "id", None):
+            src["project_id"] = state.active_project.id
+        src["chat_id"] = chat_id
+        mem_pipeline.submit(snap["conversation"], llm, notes=snap["notes"],
+                            source=src)
+    except Exception:
+        pass
 
 
 def _maybe_compress(workspace_dir: str, chat_id: str, llm: LLMProvider):

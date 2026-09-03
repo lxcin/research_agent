@@ -43,9 +43,23 @@ context:
   max_tokens: 4000
   compress_threshold: 10
 
+memory:
+  enabled: true            # Tier B personal memory write/read
+  max_inject_tokens: 1500  # read path context budget (Phase C)
+  # vector: set env RESEARCH_AGENT_MEMORY_VECTOR=1 to enable embedding layer
+
 projects:
   data_dir: ~/research-agent-data
 """, encoding="utf-8")
+
+
+def get_memory_config() -> dict:
+    config = load_config()
+    mem = config.get("memory", {})
+    return {
+        "enabled": bool(mem.get("enabled", True)),
+        "max_inject_tokens": int(mem.get("max_inject_tokens", 1500)),
+    }
 
 
 def get_model_config() -> dict:

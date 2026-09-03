@@ -65,6 +65,7 @@ class AgentState:
     needs_compression: bool = False
     conversation_turns: list = field(default_factory=list)
     compressed_summaries: list[str] = field(default_factory=list)
+    memory_units: list = field(default_factory=list)
     round_count: int = 0
     errors: list[str] = field(default_factory=list)
     sections: list[dict] = field(default_factory=list)

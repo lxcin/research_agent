@@ -20,6 +20,13 @@ def temp_data_dir(monkeypatch):
     store_mod._DB = None
     vs_mod._COLLECTIONS.clear()
 
+    # Reset Tier B memory subsystem (SQLite conn + vector availability).
+    try:
+        import research_agent.memory as mem
+        mem.reset_for_tests()
+    except Exception:
+        pass
+
     with tempfile.TemporaryDirectory() as tmpdir:
         monkeypatch.setenv("RESEARCH_AGENT_DATA_DIR", tmpdir)
         yield Path(tmpdir)
@@ -29,6 +36,12 @@ def temp_data_dir(monkeypatch):
             except Exception:
                 pass
             store_mod._DB = None
+        # Close Tier B memory SQLite connection so temp dir can be removed.
+        try:
+            import research_agent.memory as mem
+            mem.reset_for_tests()
+        except Exception:
+            pass
 
 
 @pytest.fixture

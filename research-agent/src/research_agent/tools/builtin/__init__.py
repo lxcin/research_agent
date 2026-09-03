@@ -24,3 +24,6 @@ def register_builtins():
     registry.register(check_tasks_tool)
     # Subagent spawn
     registry.register(spawn_subagent_tool)
+    # Tier B long-term memory (explicit write)
+    from research_agent.tools.builtin.memory_tool import memorize_tool
+    registry.register(memorize_tool)

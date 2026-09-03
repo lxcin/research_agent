@@ -67,7 +67,23 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
             proj += f"\n研究笔记({len(entries)}条):\n" + "\n".join(recent)
         messages.append({"role": "system", "content": proj})
 
-    # 4. Conversation history
+    # 4. Tier B personal/global memory (cross-project), only when triggered
+    try:
+        from research_agent.config import get_memory_config
+        if get_memory_config().get("enabled", True):
+            from research_agent.memory import retrieve as mem_retrieve
+            mem_block = mem_retrieve.build_memory_block(
+                state.user_input,
+                max_tokens=get_memory_config().get("max_inject_tokens", 1500),
+            )
+            if mem_block:
+                messages.append({"role": "system", "content": mem_block})
+                if hasattr(state, "memory_units"):
+                    state.memory_units = mem_retrieve.retrieve(state.user_input)
+    except Exception:
+        pass
+
+    # 5. Conversation history
     if hasattr(state, 'conversation_turns') and state.conversation_turns:
         compressed = [t for t in state.conversation_turns if t.compressed and t.summary]
         recent = [t for t in state.conversation_turns if not t.compressed][-10:]
