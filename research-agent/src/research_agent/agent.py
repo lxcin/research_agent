@@ -309,9 +309,54 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
               workspace_dir: str = "", chat_id: str = "") -> AgentState:
     set_trace_id()
     logger.info(f"run_agent START: {user_input[:80]}")
+
+    # ── Diagnostics: record every event + run fault monitor (side-channel) ──
+    from research_agent.diagnostics.recorder import EventRecorder
+    from research_agent.diagnostics.monitor import RunMonitor
+    from research_agent.trace_log import get_trace_id
+    recorder = EventRecorder(trace_id=get_trace_id(),
+                             workspace_dir=workspace_dir, chat_id=chat_id)
+    monitor = RunMonitor()
+    _diag_lock = threading.Lock()
+    _faults_emitted: set[tuple] = set()
+
+    def _diag_fault(fault: dict):
+        key = (fault.get("kind"), fault.get("tool"))
+        with _diag_lock:
+            if key in _faults_emitted:
+                return
+            _faults_emitted.add(key)
+        recorder.record("fault", fault)
+        if on_event:
+            try:
+                on_event("fault", dict(fault))
+            except Exception:
+                pass
+
+    if on_event is not None:
+        _orig_on_event = on_event
+
+        def on_event(et: str, d: dict):
+            recorder.record(et, d)
+            monitor.observe(et, d)
+            _orig_on_event(et, d)
+    else:
+        def _record_only(et: str, d: dict):
+            recorder.record(et, d)
+            monitor.observe(et, d)
+        on_event = _record_only
+
     from research_agent.tools import get_registry
     from research_agent.tools.builtin import register_builtins
     register_builtins()
+
+    monitor.observe("start", {})
+    recorder.record("start", {"input": user_input})
+
+    def _finish_run():
+        recorder.record("end", {"final_response": getattr(state, "final_response", "")})
+        for fault in monitor.finalize(getattr(state, "final_response", "")):
+            _diag_fault(fault)
 
     state.workspace_dir = workspace_dir
     state.active_chat_id = chat_id
@@ -444,7 +489,8 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             messages.append({"role": "system", "content": f"模型调用失败: {e}。请调整参数重试。"})
             if total_retries >= MAX_TOTAL_RETRIES:
                 state.final_response = f"抱歉，模型多次调用失败。"
-                _save_turn(state, project_id)
+                _save_turn(state, workspace_dir, chat_id)
+                _finish_run()
                 return state
             continue
 
@@ -618,6 +664,23 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     _maybe_compress(workspace_dir, chat_id, llm)
     _maybe_distill(state, workspace_dir, chat_id, llm)
     _mark_waiting_if_needed(state)
+
+    # ── Semantic self-eval (opt-in, one cheap LLM call at run end) ──
+    if os.environ.get("RESEARCH_AGENT_SEMANTIC_CHECK", "0") == "1":
+        try:
+            from research_agent.validate import run_semantic_check
+            issues = run_semantic_check(state, messages=messages, llm=llm)
+            for iss in issues:
+                recorder.record("semantic_issue", iss)
+                if on_event:
+                    try:
+                        on_event("semantic_issue", dict(iss))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    _finish_run()
     return state
 
 

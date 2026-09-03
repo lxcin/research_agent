@@ -551,6 +551,26 @@ async def confirm_action(body: dict):
     raise HTTPException(404, "Confirmation not found")
 
 
+@app.get("/api/diagnostics")
+async def get_diagnostics(limit: int = 20):
+    """Developer-facing diagnostics: recent faults + session summaries + report.
+
+    Rule-only aggregation (no LLM) so it is cheap and always available.
+    """
+    try:
+        from research_agent.diagnostics import scan as diag_scan
+        from research_agent.diagnostics import report as diag_report
+        result = diag_scan.scan(limit=min(limit, 100))
+        latest = diag_report.latest_report()
+        return {
+            "totals": result["totals"],
+            "sessions": result["sessions"],
+            "latest_report": latest,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"diagnostics failed: {e}")
+
+
 if __name__ == "__main__":
     import uvicorn
     print(f"PaperPilot API at http://localhost:8050")

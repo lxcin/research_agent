@@ -187,6 +187,6 @@ Phase E.5 ──────────┼→ 依赖 B 已入库
 | A | ✅ done | uncommitted (memory 包 + SQLite + 向量降级 + facade, 175 tests) |
 | B | ✅ done | uncommitted (提炼源/EXTRACT/VERIFY/异步管道/memorize, 191 tests) |
 | C | ✅ done | uncommitted (route/retrieve/trim/context注入, 204 tests) |
-| D | ⬜ todo | — |
-| E | ⬜ todo | — |
+| D | ✅ done | uncommitted (recorder/monitor/summary + agent 接入, 220 tests) |
+| E | ✅ done | uncommitted (语义自评/scan/report/CLI/API/dead_end 回写, 233 tests) |
 | F | ⬜ todo | — |
