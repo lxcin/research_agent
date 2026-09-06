@@ -60,13 +60,28 @@ def _build_resume_message(project: Project) -> str:
 
 
 def _detect_pending_task(response: str) -> PendingTask | None:
+    """Detect a task still awaiting the user (waiting-for-human state).
+
+    Returns a structured PendingTask with a trimmed actionable description
+    (strips lead-in phrases like "需要你/请你/你来"), instead of a raw
+    response tail.
+    """
     indicators = [
         "需要你", "请你", "你来", "你自己", "手动", "等待你",
-        "等你", "你来做", "需要你完成", "需要实验",
+        "等你", "你来做", "需要你完成", "需要实验", "需要您", "麻烦你",
     ]
+    response = (response or "").strip()
     for ind in indicators:
-        if ind in response:
-            return PendingTask(description=response[:200], expected_time="")
+        idx = response.find(ind)
+        if idx != -1:
+            desc = response[idx:]
+            # Trim trailing punctuation and cap at the first sentence end.
+            import re as _re
+            m = _re.search(r"[。！？.!?]", desc[1:])
+            if m:
+                desc = desc[: m.start() + 2]
+            desc = desc.strip("，,。;； ")
+            return PendingTask(description=desc[:200], expected_time="")
     return None
 
 
@@ -311,16 +326,21 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     logger.info(f"run_agent START: {user_input[:80]}")
 
     # ── Diagnostics: record every event + run fault monitor (side-channel) ──
+    from research_agent.features import is_enabled
+    _diag_on = is_enabled("diagnostics")
     from research_agent.diagnostics.recorder import EventRecorder
     from research_agent.diagnostics.monitor import RunMonitor
     from research_agent.trace_log import get_trace_id
     recorder = EventRecorder(trace_id=get_trace_id(),
-                             workspace_dir=workspace_dir, chat_id=chat_id)
+                             workspace_dir=workspace_dir, chat_id=chat_id,
+                             enabled=_diag_on)
     monitor = RunMonitor()
     _diag_lock = threading.Lock()
     _faults_emitted: set[tuple] = set()
 
     def _diag_fault(fault: dict):
+        if not _diag_on:
+            return
         key = (fault.get("kind"), fault.get("tool"))
         with _diag_lock:
             if key in _faults_emitted:
@@ -337,13 +357,15 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
         _orig_on_event = on_event
 
         def on_event(et: str, d: dict):
-            recorder.record(et, d)
-            monitor.observe(et, d)
+            if _diag_on:
+                recorder.record(et, d)
+                monitor.observe(et, d)
             _orig_on_event(et, d)
     else:
         def _record_only(et: str, d: dict):
-            recorder.record(et, d)
-            monitor.observe(et, d)
+            if _diag_on:
+                recorder.record(et, d)
+                monitor.observe(et, d)
         on_event = _record_only
 
     from research_agent.tools import get_registry
@@ -362,26 +384,28 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     state.active_chat_id = chat_id
     state.sections = []  # track structured sections for persistence
 
-    # Auto-load MCP servers from config
-    import os as _os
-    try:
-        from research_agent.tools.mcp_loader import MCPManager
-        mcp_config = _os.path.join(
-            _os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))),
-            "skills", "mcp.yml",
-        )
-        if _os.path.exists(mcp_config):
-            manager = MCPManager(mcp_config)
-            import atexit
-            atexit.register(manager.shutdown)
-            results = manager.start_all()
-            for key, names in results.items():
-                if names:
-                    _emit(on_event, "thinking", {"text": f"MCP: {len(names)} tools from {key}"})
-                elif key in results:
-                    _emit(on_event, "thinking", {"text": f"MCP: {key} failed"})
-    except Exception:
-        pass
+    # Auto-load MCP servers from config (feature-gated: skip entirely when disabled)
+    if os.environ.get("RESEARCH_AGENT_MCP", "1") == "1":
+        try:
+            from research_agent.features import is_enabled
+            if is_enabled("mcp"):
+                from research_agent.tools.mcp_loader import MCPManager
+                mcp_config = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                    "skills", "mcp.yml",
+                )
+                if os.path.exists(mcp_config):
+                    manager = MCPManager(mcp_config)
+                    import atexit
+                    atexit.register(manager.shutdown)
+                    results = manager.start_all()
+                    for key, names in results.items():
+                        if names:
+                            _emit(on_event, "thinking", {"text": f"MCP: {len(names)} tools from {key}"})
+                        elif key in results:
+                            _emit(on_event, "thinking", {"text": f"MCP: {key} failed"})
+        except Exception:
+            pass
 
     registry = get_registry()
 
@@ -699,11 +723,12 @@ def _maybe_distill(state: AgentState, workspace_dir: str, chat_id: str, llm: LLM
     if not workspace_dir or not chat_id:
         return
     try:
+        from research_agent.features import is_enabled
+        from research_agent.config import get_memory_config
+        if not is_enabled("memory_tier_b") or not get_memory_config().get("enabled", True):
+            return
         from research_agent.memory import source as mem_source
         from research_agent.memory import pipeline as mem_pipeline
-        from research_agent.config import get_memory_config
-        if not get_memory_config().get("enabled", True):
-            return
         snap = mem_source.build_extraction_source(workspace_dir, chat_id)
         if not snap["has_content"]:
             return
@@ -717,34 +742,70 @@ def _maybe_distill(state: AgentState, workspace_dir: str, chat_id: str, llm: LLM
         pass
 
 
-def _maybe_compress(workspace_dir: str, chat_id: str, llm: LLMProvider):
-    uncompressed = count_uncompressed_turns(workspace_dir, chat_id)
-    if uncompressed > 10:
-        all_turns = get_recent_turns(workspace_dir, chat_id, limit=uncompressed)
-        old_turns = all_turns[:-5]
-        if old_turns:
-            turns_text = "\n".join([f"用户: {t.user_message}\n助手: {t.assistant_message}" for t in old_turns])
-            summary = llm.complete(
-                [{"role": "user", "content": 
-                    f"将以下对话压缩为摘要，分两个字段输出JSON：\n"
-                    f"1. conclusions: 关键决策、数据、已确认结论（1-2句）\n"
-                    f"2. dead_ends: 尝试过但不可行的方向、被推翻的假设、已验证不可行的方法（保留这些很重要，避免重复犯错）\n"
-                    f"输出JSON: {{\"conclusions\": \"...\", \"dead_ends\": \"...\"}}\n"
-                    f"对话:\n{turns_text}"}],
-                max_tokens=200
-            )
-            indices = [i for i, t in enumerate(old_turns) if t.id]
-            mark_compressed(workspace_dir, chat_id, indices, summary)
+def _turns_token_count(turns) -> int:
+    """Estimate tokens of a list of conversation turns."""
+    from research_agent.context import count_tokens
+    try:
+        return sum(
+            count_tokens((t.user_message or "") + "\n" + (t.assistant_message or ""))
+            for t in turns
+        )
+    except Exception:
+        return sum(len(t.user_message or "") + len(t.assistant_message or "") for t in turns)
 
-            try:
-                from research_agent import project_manager as pm
-                existing_progress = pm.load_progress(workspace_dir)
-                progress_prompt = f"基于以下对话，用一句话总结当前项目进度（已完成什么、正在做什么、下一步做什么）:\n{turns_text}"
-                progress = llm.complete([{"role": "user", "content": progress_prompt}], max_tokens=100)
-                new_progress = existing_progress + f"\n[进度] {progress}" if existing_progress else f"[进度] {progress}"
-                pm.update_progress(workspace_dir, new_progress)
-            except Exception:
-                pass
+
+def _compress_budget() -> int:
+    """Uncompressed-history token budget before compression kicks in."""
+    env = os.environ.get("RESEARCH_AGENT_COMPRESS_TOKENS", "")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    return 12000
+
+
+def _maybe_compress(workspace_dir: str, chat_id: str, llm: LLMProvider):
+    """Compress old turns once uncompressed history exceeds a token budget.
+
+    Budget-based (instead of the old hardcoded ">10 turns") so short/long
+    messages trigger compression at comparable cost. Recent 5 turns are always
+    kept verbatim; older turns are summarized into conclusions/dead_ends and
+    appended to progress.md.
+    """
+    uncompressed = count_uncompressed_turns(workspace_dir, chat_id)
+    if uncompressed <= 6:
+        return
+    all_turns = get_recent_turns(workspace_dir, chat_id, limit=uncompressed)
+    keep_recent = 5
+    old_turns = all_turns[:-keep_recent] if len(all_turns) > keep_recent else []
+    if not old_turns:
+        return
+    if _turns_token_count(all_turns) < _compress_budget():
+        return
+
+    turns_text = "\n".join([f"用户: {t.user_message}\n助手: {t.assistant_message}" for t in old_turns])
+    summary = llm.complete(
+        [{"role": "user", "content": 
+            f"将以下对话压缩为摘要，分两个字段输出JSON：\n"
+            f"1. conclusions: 关键决策、数据、已确认结论（1-2句）\n"
+            f"2. dead_ends: 尝试过但不可行的方向、被推翻的假设、已验证不可行的方法（保留这些很重要，避免重复犯错）\n"
+            f"输出JSON: {{\"conclusions\": \"...\", \"dead_ends\": \"...\"}}\n"
+            f"对话:\n{turns_text}"}],
+        max_tokens=200
+    )
+    indices = [i for i, t in enumerate(old_turns) if t.id]
+    mark_compressed(workspace_dir, chat_id, indices, summary)
+
+    try:
+        from research_agent import project_manager as pm
+        existing_progress = pm.load_progress(workspace_dir)
+        progress_prompt = f"基于以下对话，用一句话总结当前项目进度（已完成什么、正在做什么、下一步做什么）:\n{turns_text}"
+        progress = llm.complete([{"role": "user", "content": progress_prompt}], max_tokens=100)
+        new_progress = existing_progress + f"\n[进度] {progress}" if existing_progress else f"[进度] {progress}"
+        pm.update_progress(workspace_dir, new_progress)
+    except Exception:
+        pass
 
 
 def _mark_waiting_if_needed(state: AgentState):
@@ -753,6 +814,42 @@ def _mark_waiting_if_needed(state: AgentState):
         if task:
             state.active_project.status = ProjectStatus.WAITING
             state.active_project.pending_task = task
+            _persist_pending_task(state, task)
+
+
+def _persist_pending_task(state: AgentState, task: PendingTask):
+    """Persist an awaiting-user task into Tier B memory (kind=task).
+
+    Non-blocking / best-effort; guards against storing task descriptions that
+    are just conversational filler (e.g. generic offers without an action).
+    """
+    try:
+        from research_agent.features import is_enabled
+        from research_agent.config import get_memory_config
+        if not is_enabled("memory_tier_b") or not get_memory_config().get("enabled", True):
+            return
+        from research_agent.memory.models import MemoryUnit, MemoryKind, MemoryScope
+        from research_agent.memory.tier_b import get_manager
+        desc = (task.description or "").strip()
+        if len(desc) < 4:
+            return
+        src = {}
+        if state.active_project and getattr(state.active_project, "id", None):
+            src["project_id"] = state.active_project.id
+        if getattr(state, "workspace_dir", ""):
+            src["workspace_dir"] = state.workspace_dir
+        if task.expected_time:
+            src["expected_time"] = task.expected_time
+        unit = MemoryUnit(
+            text=f"待办: {desc}",
+            kind=MemoryKind.TASK,
+            importance=0.7,
+            scope=MemoryScope.USER,
+            source=src,
+        )
+        get_manager().write(unit)
+    except Exception:
+        pass
 
 
 def process_user_input(state: AgentState, thread_id: str = "default") -> AgentState:

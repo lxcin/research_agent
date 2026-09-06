@@ -1,6 +1,69 @@
 # PaperPilot Architecture & Design Decisions
 
-## 整体架构
+## V4 变更摘要 (2026-09)
+
+> 本页主体记录 V3 架构与 10 个决策。V4 在记忆与诊断两处做了结构变更，增量记录于此，正文历史决策保留不动。
+
+### V4-A 论文检索：向量 RAG → grep 工作记忆
+
+| 维度 | V3 | V4 |
+|------|----|----|
+| 论文事实源 | ChromaDB 论文chunks + workspace md 副本 | **仅** `workspace/papers/*.md`（唯一 grep 事实源） |
+| 本地检索 | hybrid_search（向量+BM25+RRF） | `retrieval.grep_papers()` 关键词/jieba，复用文件沙箱 |
+| 落地时机 | read_paper 即自动摄入 | **两阶段**：先入 `.research-agent/tmp/papers/`（隔离临时区）→ LLM 确认后再 `persist=true` 晋升正式区 |
+| 向量库用途 | 论文检索 | **仅服务 Tier B 记忆**（`memory_units` collection） |
+
+相关文件：`paper_store.py`, `retrieval.py`, `tools/arxiv_pdf.py`, `tools/builtin/retrieve.py`
+
+### V4-B 记忆分层（工作记忆 vs 长期记忆）
+
+```
+Tier A  项目/论文 · 工作记忆 (grep)
+  workspace/papers/*.md + progress.md + conversations/*.json  (per-project)
+Tier B  个人/长期记忆 (agentic RAG · 向量 + 关键词)
+  data_dir/memory/memory_units.db + Chroma "memory_units"
+  内容 = 对话后"检索+摘要"提炼的 MemoryUnit（fact/preference/decision/
+         task/dead_end/insight/reference/style）
+  ⛔ 工具调用/工具结果/论文全文 不计入 Tier B
+  写入: _maybe_distill 异步管道 + memorize 显式工具
+  读取: agentic —— LLM 主动调用 search_memory 工具（不再自动注入记忆内容）；
+        context 仅注入一行"何时用 search_memory/memorize"的元指引
+```
+
+相关文件：`memory/` 包（models/storage/vector/source/extractor/pipeline/retrieve）、`memory_tool.py`
+
+### V4-C 故障检测与开发者报告
+
+```
+所有 emit() → EventRecorder 落 data_dir/logs/{trace_id}.jsonl（SSE 旁路）
+  → RunMonitor 产出 fault（empty_streak/tool_loop/error_streak/...）
+  → research-agent diagnose CLI / GET /api/diagnostics
+  → 报告 data_dir/diagnostics/report-{ts}.md/.json
+  → 高频故障回写 Tier B (kind=dead_end)
+  → 回合末语义自评（RESEARCH_AGENT_SEMANTIC_CHECK=1，规则+轻量LLM）
+```
+
+相关文件：`diagnostics/` 包（recorder/monitor/summary/scan/report/feedback）、`validate.py`
+
+### V4-D 可选功能 = 可插拔 Feature（轻量注册 + 静态一键卸载）
+
+```
+features/registry.py   # Feature 目录（id/label/core/depends/owned 文件+测试+数据目录/接线点）
+CLI: research-agent feature list | enable <id> | disable <id> | uninstall <id>
+
+机制:
+  - core（harness/工具/治理/工作区/论文grep）不可卸载
+  - 可选 Feature: memory_tier_b / diagnostics / mcp / knowledge_graph
+  - enable/disable → config.yml features.<id>.enabled，core 接线点据此门控跳过
+  - uninstall → 顶层引用扫描（AST，仅模块级 import）→ 无残留才删 owned 文件/测试/数据目录
+  - 安全保证: 卸载前 AST 扫描，core 仍顶层 import 该 feature 模块则拒绝并列出引用点
+```
+
+相关文件：`features/` 包、`cli.py`（feature 子命令）；core 接线点均以 `features.is_enabled()` 门控。
+
+---
+
+## V3 整体架构（历史）
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -31,21 +94,22 @@
 │  validate_response(state) → 幻觉检测                      │
 ├──────────────────────────────────────────────────────────┤
 │                    工具系统层                              │
-│  ToolRegistry (13 tools, 可插拔)                          │
+│  ToolRegistry (可插拔: builtin/user/MCP/subagent)        │
 │  ┌──────┬──────┬──────┬──────┬──────┬──────┐                    │
-│  │论文层  │执行层  │文件层  │编排层  │用户扩展│MCP │                    │
-│  │retrieve│shell_ │read   │spawn  │my_tools/│外部 │                  │
-│  │search  │exec   │write  │sub-   │自动导入  │工具 │                  │
-│  │read    │       │ edit  │agent  │         │    │                  │
-│  │update  │       │ glob  │       │         │    │                  │
-│  │notes   │       │ grep  │       │         │    │                  │
-│  │delete  │       │check_ │       │         │    │                  │
-│  │paper   │       │tasks  │       │         │    │                  │
+│  │论文层  │执行层  │文件层  │编排层  │记忆层  │MCP │                    │
+│  │retrieve│shell_ │read   │spawn  │memorize│外部│                  │
+│  │search  │exec   │write  │sub-   │(TierB) │工具 │                  │
+│  │read    │       │ edit  │agent  │        │    │                  │
+│  │update  │       │ glob  │       │        │    │                  │
+│  │notes   │       │ grep  │       │        │    │                  │
+│  │delete  │       │check_ │       │        │    │                  │
+│  │paper   │       │tasks  │       │        │    │                  │
 │  └──────┴──────┴──────┴──────┴──────┴──────┘                    │
 ├──────────────────────────────────────────────────────────┤
 │                    存储层                                  │
-│  ChromaDB (向量)  │  SQLite (论文元数据)  │  Filesystem (项目/对话/工作区) │
-│  论文全文+元数据    │  论文记录              │  代码/结果/日志/project.json  │
+│  SQLite (论文元数据/KG) │ Filesystem (项目/对话/工作区)     │
+│  memory_units.db (Tier B, data_dir)  │ workspace/papers/*.md │
+│  data_dir/logs/*.jsonl (诊断事件流)                        │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -80,15 +144,16 @@
 **之前**: `max_tokens=4000` 硬编码，`trim_messages` 一刀切截断  
 **现在**: 按模型自适应上限（DeepSeek 64K / GPT-4o 128K / Claude 200K / Gemini 1M）
 
-**分层注入顺序**:
+**分层注入顺序** (V4，见顶部 V4-B 记忆分层):
 ```
 系统记忆 (BASE_PROMPT + 工具列表)
-  → 项目记忆 (accumulated_wisdom)
+  → 项目记忆 (progress.md，即早期设计所称 accumulated_wisdom)
+  → Tier B 全局记忆 (<Global Memory>，ROUTE 触发时注入，见 V4-B)
   → 对话历史 (压缩摘要 + 最近 10 轮)
-  → 检索数据
   → Skill/Workflow 注入
   → 用户输入 (最后，最新鲜)
 ```
+> 注：V1 文档/代码中的 `accumulated_wisdom` 字段未落地，实际项目记忆为 `progress.md`（`context.py` 读取最近 20 行）。
 
 ### 决策 5: `build_chat_context` + `messages` 分离 → 统一 messages
 

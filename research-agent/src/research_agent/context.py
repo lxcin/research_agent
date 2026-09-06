@@ -67,19 +67,14 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
             proj += f"\n研究笔记({len(entries)}条):\n" + "\n".join(recent)
         messages.append({"role": "system", "content": proj})
 
-    # 4. Tier B personal/global memory (cross-project), only when triggered
+    # 4. Personal-memory meta hint (NOT memory content — content only comes via
+    #    the search_memory tool which the LLM invokes itself, agentic RAG read).
     try:
-        from research_agent.config import get_memory_config
-        if get_memory_config().get("enabled", True):
-            from research_agent.memory import retrieve as mem_retrieve
-            mem_block = mem_retrieve.build_memory_block(
-                state.user_input,
-                max_tokens=get_memory_config().get("max_inject_tokens", 1500),
-            )
-            if mem_block:
-                messages.append({"role": "system", "content": mem_block})
-                if hasattr(state, "memory_units"):
-                    state.memory_units = mem_retrieve.retrieve(state.user_input)
+        from research_agent.features import is_enabled
+        if is_enabled("memory_tier_b"):
+            messages.append({"role": "system", "content":
+                "关于用户本人的问题（偏好/说过的事/领域/历史决定），调用 search_memory 查询长期记忆后再回答；"
+                "用户明确要求记住某信息时调用 memorize。不要凭空编造用户记忆。"})
     except Exception:
         pass
 

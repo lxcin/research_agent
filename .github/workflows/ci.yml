@@ -24,7 +24,7 @@ jobs:
       - name: Run tests
         run: |
           pip install pytest-timeout
-          PYTHONPATH=src pytest tests/ -v --tb=short -k "not (test_e2e or test_integration or test_llm or test_vector_store or test_retrieval or test_ingestion)"
+          PYTHONPATH=src pytest tests/ -q --tb=short -p no:cacheprovider
         working-directory: research-agent
 
       - name: Check credentials
@@ -36,6 +36,7 @@ jobs:
         run: |
           test -f docs/SPEC.md && echo "SPEC OK"
           test -f docs/PLAN.md && echo "PLAN OK"
+          test -f docs/V4_PLAN.md && echo "V4_PLAN OK"
           test -f docs/SPEC_PROCESS.md && echo "PROCESS OK"
           test -f docs/AGENT_LOG.md && echo "LOG OK"
           test -f docs/REFLECTION.md && echo "REFLECTION OK"

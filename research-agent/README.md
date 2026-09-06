@@ -1,8 +1,8 @@
 # PaperPilot — Research Coding Agent Harness
 
-PaperPilot is a self-implemented ReAct-style agent loop with 13 tools, governance guardrails, feedback loops, and workspace management. Unlike ChatGPT, it runs tools deterministically on your filesystem with safety boundaries — search papers, read full text, reproduce experiments, write surveys, all in one chat interface.
+PaperPilot is a self-implemented ReAct-style agent loop with pluggable tools, governance guardrails, feedback loops, and workspace management. Unlike ChatGPT, it runs tools deterministically on your filesystem with safety boundaries — search papers, read full text, reproduce experiments, write surveys, all in one chat interface. V4 adds two-tier memory (papers as grep-able working memory + personal long-term memory) and developer-facing fault diagnostics.
 
-PaperPilot 是一个自实现的 ReAct 风格 Agent 循环，内置 13 个工具、治理护栏、反馈回路和项目空间管理。与 ChatGPT 不同，它在本地文件系统上确定性执行工具操作，并设有安全边界 —— 搜索论文、阅读全文、复现实验、撰写综述，一站式完成。
+PaperPilot 是一个自实现的 ReAct 风格 Agent 循环，内置可插拔工具、治理护栏、反馈回路和项目空间管理。与 ChatGPT 不同，它在本地文件系统上确定性执行工具操作，并设有安全边界 —— 搜索论文、阅读全文、复现实验、撰写综述，一站式完成。V4 新增双层记忆（论文作为可 grep 的工作记忆 + 个人长期记忆）与面向开发者的故障诊断。
 
 ---
 
@@ -164,12 +164,12 @@ Validation failures are injected as system messages so the LLM can self-correct 
 
 ## 已知限制 (Known Limitations)
 
-- **ChromaDB / sentence-transformers:** Vector search requires `sentence-transformers`; degrades gracefully to BM25-only if unavailable or on first import. Install with `pip install sentence-transformers` for full hybrid retrieval (vector + BM25 + RRF fusion).
-- **Desktop App:** Requires Edge WebView2 runtime — built-in on Windows 10+, optional install on older Windows.
-- **Max Rounds:** Maximum 50 agent rounds per request. Configurable via `RESEARCH_AGENT_MAX_ROUNDS` environment variable.
-- **Shell Execution:** Uses `shell=True` in `subprocess.run()`. Risk mitigated by the 12-pattern guardrail + HITL confirmation flow.
-- **Single-user:** No authentication layer. Assumes local or trusted-network deployment.
-- **ArXiv rate limits:** `search_papers` calls the public arXiv API; excessive use may be rate-limited.
+- **记忆向量层（可选）:** Tier B 个人记忆默认用关键词检索（始终可用）。如需语义检索，安装 `sentence-transformers` 并设 `RESEARCH_AGENT_MEMORY_VECTOR=1`；模型缺失时自动降级回关键词，不影响主功能。
+- **Desktop App:** 需要 Edge WebView2 runtime —— Windows 10+ 内置，旧 Windows 需手动安装。
+- **Max Rounds:** 单个请求最多 50 轮 agent 循环。可用 `RESEARCH_AGENT_MAX_ROUNDS` 环境变量配置。
+- **Shell Execution:** 使用 `shell=True`。风险由 12 模式 guardrail + HITL 审批流程缓解。
+- **Single-user:** 无鉴权层。假定本地或可信网络部署。
+- **ArXiv rate limits:** `search_papers` 调用公开 arXiv API；过度使用可能被限流。
 
 ---
 

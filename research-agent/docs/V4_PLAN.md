@@ -100,15 +100,18 @@ read_paper(paper_id, persist=true)   # 阶段2：临时区 → workspace/papers/
 
 ---
 
-## Phase C: Tier B 读路径（agentic RAG 漏斗 + 注入）
+## Phase C: Tier B 读路径（agentic 工具式，2026-09 演进）
 
-| # | Task | 文件 | 验证 |
+| # | Task | 文件 | 状态 |
 |---|------|------|------|
-| C.1 | ROUTE：小模型一次调用判断是否需全局记忆并生成 queries（拦截"我记得…/你偏好…"类） | `memory/retrieve.py` | MockLLM |
-| C.2 | RETRIEVE：向量+BM25 混合、RRF 融合（复用原 `retrieval.py` 算法），+ 时间衰减/importance 加权 | `memory/retrieve.py` | 单测 |
-| C.3 | RANK + 预算裁剪（默认 ~1500 tok，可配） | `memory/retrieve.py` | 单测：超预算截断 |
-| C.4 | 注入 `<Global Memory>` 块到 `build_context`（分层注入点 3~4 之间），带来源回链 | `context.py` | MockLLM 集成：注入顺序断言 |
-| C.5 | `AgentState.memory_units` 记录命中结果 | `models.py` | 单测 |
+| C.1 | ~~ROUTE 注入门控~~ → **LLM 主动调用 `search_memory` 工具**（agentic read：query/scope/kind 由 LLM 决定） | `tools/builtin/memory_tool.py` | ✅ done |
+| C.2 | RETRIEVE：USER scope 关键词检索（scope/kind 过滤） | `memory/retrieve.py` `retrieve()` | ✅ done |
+| C.3 | `format_hits`：可读命中块（kind+来源回链） | `memory/retrieve.py` | ✅ done |
+| C.4 | `build_context` 移除 `<Global Memory>` 内容注入，仅保留静态元指引 | `context.py` | ✅ done |
+| C.5 | `search_memory`/`memorize` 注册于 builtin（memory_tier_b 门控内） | `tools/builtin/__init__.py` | ✅ done |
+
+> 设计演变：读取从"context 预注入（ROUTE 触发词）"改为"LLM 主动调用工具"——更贴合 agentic RAG
+> （是否查、查什么由 LLM 决策；内容仅在需要时进入上下文）。`AgentState.memory_units` 已不再由注入填充。
 
 ---
 
@@ -183,10 +186,10 @@ Phase E.5 ──────────┼→ 依赖 B 已入库
 
 | Phase | 状态 | 关键 commit |
 |-------|------|-------------|
-| M | ✅ done | uncommitted (grep 化两阶段落地, 161 tests) |
-| A | ✅ done | uncommitted (memory 包 + SQLite + 向量降级 + facade, 175 tests) |
-| B | ✅ done | uncommitted (提炼源/EXTRACT/VERIFY/异步管道/memorize, 191 tests) |
-| C | ✅ done | uncommitted (route/retrieve/trim/context注入, 204 tests) |
-| D | ✅ done | uncommitted (recorder/monitor/summary + agent 接入, 220 tests) |
-| E | ✅ done | uncommitted (语义自评/scan/report/CLI/API/dead_end 回写, 233 tests) |
-| F | ⬜ todo | — |
+| M | ✅ done | `d0b359c` (论文 grep 化两阶段落地) |
+| A | ✅ done | `fd87782` (memory 包 + SQLite + 向量降级 + facade) |
+| B | ✅ done | `fd87782` (提炼源/EXTRACT/VERIFY/异步管道/memorize) |
+| C | ✅ done | `fd87782` (route/retrieve/trim/context注入) |
+| D | ✅ done | `9860097` (recorder/monitor/summary + agent 接入) |
+| E | ✅ done | `9860097` (语义自评/scan/report/CLI/API/dead_end 回写) |
+| F | ✅ done | uncommitted (ARCHITECTURE/README 修订、压缩 token 预算、task 结构化、CI, 241 tests) |

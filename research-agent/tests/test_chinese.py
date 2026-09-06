@@ -1,22 +1,17 @@
-from research_agent.router import _tokenize, _compute_match_score, route_to_project
-from research_agent.models import Project, ProjectStatus
+from research_agent.router import extract_project_topic
 
 
-def test_tokenize_chinese():
-    tokens = _tokenize("我想研究Transformer模型在NLP中的应用")
-    assert "Transformer" in tokens
-    assert "NLP" in tokens
-    assert "研究" in tokens
+def test_extract_topic_chinese():
+    topic = extract_project_topic("帮我开个新项目研究Transformer模型")
+    assert "Transformer" in topic
 
 
-def test_tokenize_english():
-    tokens = _tokenize("I want to study Transformer")
-    assert "transformer" in tokens
+def test_extract_topic_with_create_keyword():
+    topic = extract_project_topic("create project about HPLC analysis")
+    assert "HPLC" in topic
+    assert "create project" not in topic.lower()
 
 
-def test_route_chinese():
-    p1 = Project(id="p1", topic="Transformer模型研究", status=ProjectStatus.ACTIVE)
-    p2 = Project(id="p2", topic="HPLC化合物分析", status=ProjectStatus.ACTIVE)
-    result = route_to_project("上次那个Transformer的attention机制分析结果怎么样了", [p1, p2])
-    assert result is not None
-    assert result.id == "p1"
+def test_extract_topic_defaults_to_input():
+    topic = extract_project_topic("帮我搜一下注意力机制的论文")
+    assert "注意力" in topic

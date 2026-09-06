@@ -5,7 +5,6 @@ DEAD_END memory units so future sessions can avoid repeating the same mistake
 (ROUTE-triggered retrieval can surface them as reminders).
 """
 from research_agent.diagnostics.monitor import _fault_text
-from research_agent.memory.models import MemoryUnit, MemoryKind, MemoryScope
 
 # fault kinds worth persisting as reusable lessons.
 PERSIST_KINDS = {
@@ -44,8 +43,9 @@ def ingest_fault_lessons(fault_kinds: dict, mgr=None, min_count: int = _MIN_COUN
     """
     if not fault_kinds:
         return 0
+    from research_agent.memory.models import MemoryUnit, MemoryKind, MemoryScope
     if mgr is None:
-        from research_agent.memory import get_manager
+        from research_agent.memory.tier_b import get_manager
         mgr = get_manager()
 
     written = 0

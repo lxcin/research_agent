@@ -54,7 +54,7 @@ def _run_loop():
 
 def _process(job: _Job):
     """EXTRACT (+ optional note context) → VERIFY → write."""
-    from research_agent.memory import get_manager
+    from research_agent.memory.tier_b import get_manager
     conv = job.conversation
     if not conv.strip():
         return

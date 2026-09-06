@@ -9,7 +9,7 @@ from research_agent.diagnostics import scan as diag_scan
 from research_agent.diagnostics import report as diag_report
 from research_agent.diagnostics import feedback as diag_feedback
 from research_agent.diagnostics.recorder import EventRecorder
-from research_agent.memory import get_manager, MemoryScope, MemoryKind
+from research_agent.memory.tier_b import get_manager, MemoryScope, MemoryKind
 
 
 # ── E.1 rules ───────────────────────────────────────────────────────────────

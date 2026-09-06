@@ -5,7 +5,8 @@ from research_agent.llm import MockLLMProvider
 from research_agent.memory.models import MemoryKind, MemoryScope
 from research_agent.memory import source as mem_source
 from research_agent.memory import extractor, pipeline
-from research_agent.memory import get_manager, storage
+from research_agent.memory.tier_b import get_manager
+from research_agent.memory import storage
 from research_agent.tools.builtin.memory_tool import _handle_memorize
 
 

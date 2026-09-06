@@ -14,7 +14,6 @@ from difflib import SequenceMatcher
 
 from research_agent.memory.models import MemoryUnit, MemoryKind, MemoryScope
 from research_agent.memory import storage
-
 KIND_HINTS = {
     MemoryKind.FACT: "关于用户的持久事实（身份、领域、技能、习惯）",
     MemoryKind.PREFERENCE: "用户偏好（语言、工具、风格、流程）",

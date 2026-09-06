@@ -22,8 +22,8 @@ def temp_data_dir(monkeypatch):
 
     # Reset Tier B memory subsystem (SQLite conn + vector availability).
     try:
-        import research_agent.memory as mem
-        mem.reset_for_tests()
+        from research_agent.memory.tier_b import reset_for_tests
+        reset_for_tests()
     except Exception:
         pass
 
@@ -38,8 +38,8 @@ def temp_data_dir(monkeypatch):
             store_mod._DB = None
         # Close Tier B memory SQLite connection so temp dir can be removed.
         try:
-            import research_agent.memory as mem
-            mem.reset_for_tests()
+            from research_agent.memory.tier_b import reset_for_tests
+            reset_for_tests()
         except Exception:
             pass
 

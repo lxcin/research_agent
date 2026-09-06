@@ -1,7 +1,7 @@
 # tests/test_memory_units.py — Tier B memory storage + facade (Phase A)
 import pytest
 
-from research_agent.memory import MemoryManager, MemoryScope, MemoryKind, MemoryUnit, get_manager
+from research_agent.memory.tier_b import MemoryManager, MemoryScope, MemoryKind, MemoryUnit, get_manager
 from research_agent.memory import storage, vector
 
 

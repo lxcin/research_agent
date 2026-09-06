@@ -344,6 +344,66 @@ event types:
 
 ---
 
+## V4：记忆分层 + 故障检测（2026-09）
+
+### 2026-09-03 — V4 规划：双层记忆 + 故障检测报告
+
+**触发技能**: brainstorming（架构讨论）+ writing-plans（V4_PLAN.md）
+
+关键决策（用户拍板）：
+1. **论文检索整体 grep 化**：不建论文向量库，`workspace/papers/*.md` 是唯一事实源
+2. **B 记忆用向量库但只收"对话后检索+摘要"提炼内容**，工具调用/结果永不进 B
+3. **论文两阶段落地**：先入 `.research-agent/tmp/papers/` 沙箱临时区 → `read_paper(persist=true)` 才晋升正式区
+4. **SQLite 论文元数据 / KG / upload API 属历史特性**，闲置不删
+5. **故障检测分层**：过程性(确定性)优先于语义性(LLM 自评)；报告面向开发者 → API + CLI
+
+**产出**: `docs/V4_PLAN.md`（M/A/B/C/D/E/F 七阶段）
+
+---
+
+### 2026-09-03 — Commit `d0b359c`: 论文检索 grep 化（Phase M）
+
+**变更**:
+- 新增 `paper_store.py`（正式区/临时区/晋升）
+- `retrieval.py` 重写为 `grep_papers`（jieba 中英分词），hybrid/BM25/RRF 退役为 shim
+- `read_paper` 两阶段 persist；`arxiv_pdf.py` 纯下载+解析（去掉 ingestion/Chroma）
+- gitignore 加 `.research-agent/tmp/`；`_evaluate_retrieval` 门控停用
+
+**教训**: 论文检索原来依赖 Chroma 默认 ONNX embedding（缺 onnxruntime 即炸）。grep 化后这批环境敏感用例消失，测试从"需可选依赖"变纯确定性。
+
+---
+
+### 2026-09-03 — Commit `fd87782`: Tier B 个人记忆（Phase A+B+C）
+
+**变更**:
+- `memory.py` 模块 → `memory/` 包（旧 conversation API 保留，`agent.py` 零改动）
+- MemoryUnit + SQLite（supersede 链/importance/关键词打分）+ 可选向量层（env 门控，缺模型降级）
+- 写路径：`source.py`(只收对话，逐行剥工具痕迹) → EXTRACT(小模型 JSON) → VERIFY(去重/冲突) → 异步 pipeline + `memorize` 工具
+- 读路径：ROUTE(触发词) → USER scope 检索 → token 预算裁剪 → `<Global Memory>` 注入 `build_context`
+
+**关键约束落实（有测试断言）**: 工具调用/结果不进 B；`memory.enabled=false` 与 V3 行为一致。
+
+---
+
+### 2026-09-03 — Commit `9860097`: 故障检测 + 开发者报告（Phase D+E）
+
+**变更**:
+- `diagnostics/` 包：EventRecorder(JSONL 事件流) + RunMonitor(empty_streak/tool_loop/error_streak/search_exhausted/llm_unstable/no_response) + summary/scan/report/feedback
+- `research-agent diagnose` CLI + `GET /api/diagnostics`
+- 语义自评（规则 + 轻量 LLM，`RESEARCH_AGENT_SEMANTIC_CHECK=1` 门控）
+- 高频故障(≥2) 回写 Tier B `dead_end`
+- 顺手修复重试耗尽路径 `_save_turn(state, project_id)` 未定义变量的潜在崩溃
+
+---
+
+### 2026-09-03 — Phase F 打磨（未提交）
+
+**变更**: ARCHITECTURE.md 补 V4 变更摘要(修正 accumulated_wisdom 与实现不符)；`_maybe_compress` 由">10轮"改 token 预算；`_detect_pending_task` 结构化 + 待办写 Tier B task unit；CI 全量测试（去掉向量排除）
+
+**测试**: 241 pass + demo 全过
+
+---
+
 ## 总结：经验教训
 
 1. **Subagent 的"完成"不等于真正完成** — 评估标注 done 但实际结果无意义，必须人工验证
@@ -354,3 +414,5 @@ event types:
 6. **设计讨论比实现更重要** — 上下文、缓存、压缩等设计决策花了大量时间讨论，但最终实现顺利
 7. **Governance 是最大的价值** — guardrail + HITL + feedback 全是确定性代码，不是 prompt-based 的不可靠方案
 8. **文件系统优于数据库** — workspace-based model 让项目迁移从"数据库操作"变成"文件复制"
+9. **功能分层要与记忆分层解耦** — 论文(工作记忆,grep)与个人(长期记忆,agentic RAG)检索必须物理隔离，避免互相污染
+10. **确定性故障检测是语义自评的地基** — 空回/转圈/重复调用先要能自动发现，讨论"生成质量"才有稳定载体
