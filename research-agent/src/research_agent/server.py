@@ -1,16 +1,14 @@
-"""FastAPI server for PaperPilot research agent frontend."""
+"""FastAPI API server for PaperPilot (API only — no bundled frontend)."""
 import json
 import uuid
 import asyncio
 import os
 import threading
 import queue
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import tempfile
 
@@ -27,8 +25,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend"
-FRONTEND_DIST = FRONTEND_DIR / "dist"
+
+@app.get("/")
+async def root():
+    return {"name": "PaperPilot API", "docs": "/docs", "health": "/api/health"}
 
 
 def _feature_guard(feature_id: str, label: str = ""):
@@ -42,14 +42,6 @@ def _feature_guard(feature_id: str, label: str = ""):
         return
     name = label or feature_id
     raise HTTPException(404, f"功能未启用或已卸载: {name}")
-
-# Serve built frontend when available
-if FRONTEND_DIST.exists():
-    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
-    
-    @app.get("/")
-    async def serve_index():
-        return FileResponse(FRONTEND_DIST / "index.html")
 
 
 class ApiConfig(BaseModel):

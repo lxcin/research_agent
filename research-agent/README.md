@@ -17,34 +17,29 @@ git clone https://github.com/lxcin/research_agent.git
 cd research_agent
 pip install -e .
 
-# 启动 CLI
+# 启动 CLI（主要交互方式）
 research-agent chat
 
-# 启动桌面版
-cd research-agent
-pip install -r requirements.txt
-PYTHONPATH=src python desktop.py
-
-# 启动 WebUI（可选）
+# 启动 API 服务（可选）
 PYTHONPATH=src python -m uvicorn research_agent.server:app --host 0.0.0.0 --port 8050
+# 开发者诊断
+research-agent diagnose
+research-agent feature list
 ```
 
-**依赖**: Python 3.11+, Edge WebView2 (Windows 10+ 内置)
+**依赖**: Python 3.11+
 
 ---
 
 ## API Key 安全配置 (Security Configuration)
 
-**方式一：UI 设置面板 (Recommended)**
-Open the web interface → ⚙️ Settings panel → enter your API key. Stored in browser localStorage (Web) or env vars (Desktop).
-
-**方式二：环境变量**
+**方式一：环境变量 (Recommended)**
 ```bash
 DEEPSEEK_API_KEY=sk-xxx
 ```
 Supported providers: DeepSeek, OpenAI, Anthropic, OpenAI-compatible.
 
-**方式三：config.yml (⚠ 明文存储风险)**
+**方式二：config.yml (⚠ 明文存储风险)**
 Write the key into `~/research-agent-data/config.yml`. Plaintext on disk — do not use in shared environments.
 
 **安全红线：**
@@ -59,10 +54,12 @@ Write the key into `~/research-agent-data/config.yml`. Plaintext on disk — do 
 
 | 形态 | 命令 | 说明 |
 |------|------|------|
-| **CLI** | `pip install git+https://github.com/lxcin/research_agent.git` → `research-agent chat` | 命令行交互 |
-| **Desktop** | `PYTHONPATH=src python desktop.py` | pywebview 原生窗口 |
-| **Docker** | `docker compose up` | 后端 :8050 + 前端 :5173 |
-| **源码** | [GitHub Release](https://github.com/lxcin/research_agent/releases) | 下载 `v3.0.0` 源码 zip |
+| **CLI** | `pip install git+https://github.com/lxcin/research_agent.git` → `research-agent chat` | 命令行交互（主要入口） |
+| **Docker** | `docker compose up` | 后端 API :8050 |
+| **API** | `uvicorn research_agent.server:app` | 纯 API（/api/*、/docs） |
+| **源码** | [GitHub Release](https://github.com/lxcin/research_agent/releases) | 下载源码 zip |
+
+> V4 起不再捆绑 Web/Desktop 前端；交互以 CLI 为主，未来重构为逐文件提案式（git diff + keep/undo）。
 
 ---
 
@@ -70,53 +67,30 @@ Write the key into `~/research-agent-data/config.yml`. Plaintext on disk — do 
 
 ```
 research-agent/
-├── src/research_agent/        # Backend harness
+├── src/research_agent/        # Backend harness + API
 │   ├── agent.py               # Agent loop — ReAct-style main loop (function calling)
-│   ├── guardrail.py           # 12-pattern safety guardrail (deterministic, no LLM)
-│   ├── server.py              # FastAPI server (SSE streaming)
-│   ├── context.py             # Token-aware context builder + skill injection
-│   ├── project_manager.py     # File-based project/chat storage (JSON on disk)
-│   ├── config.py              # Configuration (API keys, env vars, YAML)
-│   ├── llm.py                 # LiteLLM provider wrapper with retry
-│   ├── validate.py            # Response validation (hallucination, citation check)
-│   ├── retrieval.py           # Hybrid search (vector + BM25 + RRF fusion)
-│   ├── ingestion.py           # PDF ingestion + semantic chunking
-│   ├── search.py              # arXiv API client
-│   ├── store.py               # SQLite storage (metadata, paper cache)
-│   ├── knowledge_graph.py     # Paper → claim → relation graph (NetworkX)
-│   ├── memory.py              # Conversation turn persistence
-│   ├── models.py              # Pydantic data models
-│   ├── router.py              # Intent-to-tool-subset routing (dev utility)
-│   ├── trace_log.py           # Structured request tracing + logger
-│   ├── skill_loader.py        # External skill definitions (YAML/.md)
-│   ├── vector_store.py        # ChromaDB vector store wrapper
-│   └── tools/                 # Tool registry + 13 built-in tools
-│       ├── __init__.py        # ToolRegistry singleton with dedup
-│       ├── schema.py          # ToolSchema, ToolResult types
-│       ├── validate_params.py # Parameter validation before dispatch
-│       ├── subagent.py        # spawn_subagent — parallel subtask execution
-│       ├── arxiv_pdf.py       # arXiv PDF fetcher
-│       ├── mcp_loader.py      # MCP server loader (stdio/SSE)
-│       ├── git_tool.py        # Git checkpoint / rollback integration
-│       ├── router.py          # Tool intent routing
-│       └── builtin/           # Built-in tool implementations
-│           ├── retrieve.py    # retrieve, search_papers, read_paper, update_notes, delete_paper
-│           └── filesystem.py  # shell_exec, file_read/write/edit/glob/grep, check_tasks
-├── frontend/                  # React + TypeScript + Vite
-│   ├── src/
-│   │   ├── App.tsx            # Main app (SSE event handling)
-│   │   └── components/        # ChatArea, ChatInput, Sidebar, etc.
-│   └── dist/                  # Production build output
-├── tests/                     # Mock-LLM deterministic tests (pytest)
-├── skills/                    # User-defined skill definitions (YAML/.md)
-├── my_tools/                  # User-defined custom tools (.py)
-├── Dockerfile.backend         # Backend container
-├── Dockerfile.frontend        # Frontend container (nginx)
-├── docker-compose.yml         # Multi-service orchestration
-├── render.yaml                # Render.com deployment config
-├── paperpilot.spec            # PyInstaller build spec
-├── requirements.txt           # Python dependencies
-└── desktop.py                 # pywebview desktop launcher
+│   ├── context.py             # Token-aware layered context builder
+│   ├── server.py              # FastAPI 纯 API（/api/chat SSE 流式等）
+│   ├── cli.py                 # CLI: chat / diagnose / feature 子命令
+│   ├── llm.py / config.py     # LLM 抽象 + 配置(API key, data_dir, memory)
+│   ├── guardrail.py / validate.py / trace_log.py   # 治理/反馈/追踪
+│   ├── project_manager.py     # 项目/对话 JSON 存储（workspace 模型）
+│   ├── paper_store.py         # 论文 .md 正式区/临时区两阶段布局
+│   ├── retrieval.py           # grep_papers 关键词检索（jieba）
+│   ├── search.py              # arXiv API 客户端
+│   ├── store.py               # SQLite（历史论文元数据/项目关联）
+│   ├── memory/                # 对话持久化(core) + Tier B 个人记忆(tier_b/…)
+│   ├── diagnostics/           # 事件流/监控/scan/report/feedback
+│   ├── features/              # 可插拔 Feature 注册表(list/enable/disable/uninstall)
+│   ├── knowledge_graph.py / ingestion.py / vector_store.py  # 历史 API(可选 feature)
+│   └── tools/                 # ToolRegistry + builtin/subagent/arxiv_pdf/mcp_loader/git_tool
+├── skills/                    # 外部技能定义（YAML 头 + Markdown）
+├── my_tools/                  # 用户自定义工具（.py）
+├── tests/                     # Mock-LLM 确定性测试（pytest）
+├── Dockerfile.backend         # 后端容器
+├── docker-compose.yml         # 编排（仅 backend）
+├── render.yaml                # Render.com 部署
+└── requirements.txt / pyproject.toml
 ```
 
 ---
@@ -139,7 +113,7 @@ All checks are code-only, no LLM involved. Each pattern is testable with mock in
 | `sudo` | Privilege escalation |
 
 ### HITL — Human-in-the-Loop Approval
-Blocked commands trigger a confirmation dialog in the UI. User has **60 seconds** to approve or reject. Unconfirmed commands are cancelled automatically.
+Blocked commands trigger a confirmation request. User has **60 seconds** to approve or reject. Unconfirmed commands are cancelled automatically.
 
 ### Path Sandbox
 All file operations (`file_read`, `file_write`, `file_edit`, `file_glob`, `file_grep`) are scoped to the active workspace directory. Path traversal (`../`) is resolved via `os.path.normpath` and checked against the workspace root. Any path escaping the workspace is blocked before dispatch.
@@ -156,7 +130,7 @@ Validation failures are injected as system messages so the LLM can self-correct 
 
 ### API Key Protection
 - Never hardcoded in source code
-- Stored in browser localStorage (Web) or environment variables (Desktop / Docker)
+- Set via environment variables (CLI / Docker) or `config.yml`
 - `.env` excluded from git via `.gitignore`
 - CI credential scanner rejects commits containing key patterns
 
@@ -165,11 +139,11 @@ Validation failures are injected as system messages so the LLM can self-correct 
 ## 已知限制 (Known Limitations)
 
 - **记忆向量层（可选）:** Tier B 个人记忆默认用关键词检索（始终可用）。如需语义检索，安装 `sentence-transformers` 并设 `RESEARCH_AGENT_MEMORY_VECTOR=1`；模型缺失时自动降级回关键词，不影响主功能。
-- **Desktop App:** 需要 Edge WebView2 runtime —— Windows 10+ 内置，旧 Windows 需手动安装。
 - **Max Rounds:** 单个请求最多 50 轮 agent 循环。可用 `RESEARCH_AGENT_MAX_ROUNDS` 环境变量配置。
 - **Shell Execution:** 使用 `shell=True`。风险由 12 模式 guardrail + HITL 审批流程缓解。
 - **Single-user:** 无鉴权层。假定本地或可信网络部署。
 - **ArXiv rate limits:** `search_papers` 调用公开 arXiv API；过度使用可能被限流。
+- **前端（重构中）:** V4 已移除 Web/Desktop 前端；交互以 CLI 为主，逐文件提案式（git diff + keep/undo）交互在规划中。
 
 ---
 
@@ -177,8 +151,7 @@ Validation failures are injected as system messages so the LLM can self-correct 
 
 ### GitHub Actions (configured)
 - **Backend tests:** `pytest` on push/PR — all tests use mock LLM (deterministic, no API key needed)
-- **Frontend build:** `tsc --noEmit` + `vite build` on push/PR
-- **Docker images:** Build and push `pp-backend` and `pp-frontend` to **GitHub Container Registry (GHCR)** on merge to master
+- **Docker image:** Build and push `pp-backend` to **GitHub Container Registry (GHCR)** on merge to master
 - **Credential scanner:** Blocks commits containing API key patterns
 
 ### Render Auto-Deploy

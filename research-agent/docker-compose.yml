@@ -15,15 +15,5 @@ services:
       - research_data:/root/research-agent-data
     restart: unless-stopped
 
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    ports:
-      - "5173:80"
-    depends_on:
-      - backend
-    restart: unless-stopped
-
 volumes:
   research_data:

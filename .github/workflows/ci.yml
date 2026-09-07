@@ -46,23 +46,9 @@ jobs:
         run: PYTHONPATH=src python tests/demo_mechanisms.py
         working-directory: research-agent
 
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 18
-      - name: Build frontend
-        run: |
-          npm install
-          npx tsc --noEmit
-          npx vite build
-        working-directory: research-agent/frontend
-
   docker:
     runs-on: ubuntu-latest
-    needs: [backend, frontend]
+    needs: [backend]
     permissions:
       packages: write
     steps:
@@ -70,14 +56,9 @@ jobs:
       - name: Build backend image
         run: docker build -f Dockerfile.backend -t pp-backend:ci .
         working-directory: research-agent
-      - name: Build frontend image
-        run: docker build -f Dockerfile.frontend -t pp-frontend:ci .
-        working-directory: research-agent
-      - name: Push images to GHCR
+      - name: Push backend image to GHCR
         if: github.ref == 'refs/heads/master'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           docker tag pp-backend:ci ghcr.io/${{ github.repository }}/pp-backend:latest
-          docker tag pp-frontend:ci ghcr.io/${{ github.repository }}/pp-frontend:latest
           docker push ghcr.io/${{ github.repository }}/pp-backend:latest
-          docker push ghcr.io/${{ github.repository }}/pp-frontend:latest

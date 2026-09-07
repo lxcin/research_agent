@@ -52,8 +52,7 @@ FEATURES: dict[str, Feature] = {
                      "research_agent/search.py", "research_agent/store.py",
                      "research_agent/trace_log.py", "research_agent/llm.py",
                      "research_agent/validate.py", "research_agent/skill_loader.py",
-                     "research_agent/server.py", "research_agent/cli.py",
-                     "research_agent/desktop.py"],
+                     "research_agent/server.py", "research_agent/cli.py"],
     ),
     # V4 Tier B personal memory (long-term memory). Note: the legacy
     # conversation-persistence API lives in research_agent.memory.__init__ and is
