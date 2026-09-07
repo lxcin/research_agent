@@ -30,6 +30,19 @@ app.add_middleware(
 FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend"
 FRONTEND_DIST = FRONTEND_DIR / "dist"
 
+
+def _feature_guard(feature_id: str, label: str = ""):
+    """Reject a request when an optional feature is disabled/uninstalled.
+
+    Turns a would-be ImportError/500 (after feature uninstall) into a clean 404
+    with an explanation, so historical API endpoints degrade gracefully.
+    """
+    from research_agent.features import is_enabled
+    if is_enabled(feature_id):
+        return
+    name = label or feature_id
+    raise HTTPException(404, f"功能未启用或已卸载: {name}")
+
 # Serve built frontend when available
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
@@ -190,6 +203,7 @@ async def get_workspace_info(dir: str = ""):
 
 @app.get("/api/graph")
 async def get_graph():
+    _feature_guard("knowledge_graph", "知识图谱 API")
     from research_agent.knowledge_graph import load_graph
     kg = load_graph()
     nodes, edges, node_ids = [], [], set()
@@ -222,6 +236,7 @@ async def get_graph():
 
 @app.get("/api/graph/{paper_id}")
 async def get_paper_graph(paper_id: str):
+    _feature_guard("knowledge_graph", "知识图谱 API")
     from research_agent.knowledge_graph import build_paper_argument_tree
     from research_agent.ingestion import recall_full_paper
     from research_agent.llm import LiteLLMProvider
@@ -246,6 +261,7 @@ async def list_papers():
 
 @app.delete("/api/papers/{paper_id}")
 async def delete_paper(paper_id: str):
+    _feature_guard("knowledge_graph", "论文库管理 API")
     from research_agent.store import delete_paper, get_paper
     from research_agent.vector_store import delete_paper as delete_vec_paper
     paper = get_paper(paper_id)
@@ -261,6 +277,7 @@ async def delete_paper(paper_id: str):
 
 @app.post("/api/upload/pdf")
 async def upload_pdf(file: UploadFile = File(...), dir: str = ""):
+    _feature_guard("knowledge_graph", "论文上传 API")
     ext = (file.filename or "").lower().rsplit(".", 1)[-1] if "." in (file.filename or "") else ""
     if ext not in ("pdf", "md", "txt"):
         raise HTTPException(400, "Only PDF, Markdown (.md) and text (.txt) files allowed")
@@ -321,6 +338,7 @@ async def get_workspace_papers(dir: str = ""):
 async def get_workspace_paper(dir: str = "", paper_id: str = ""):
     if not paper_id:
         raise HTTPException(400, "paper_id required")
+    _feature_guard("knowledge_graph", "论文库 API")
     from research_agent.store import get_paper as gp
     from research_agent.vector_store import get_collection as get_vcoll
 

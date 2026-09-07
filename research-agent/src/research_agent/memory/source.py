@@ -4,9 +4,7 @@ Guarantees the material fed to the small-model extractor NEVER contains tool
 calls / tool results / file diffs / shell output. Only conversational content
 (user messages + assistant answers) and project note increments are allowed.
 """
-import re
-
-from research_agent.memory import get_recent_turns, count_uncompressed_turns
+from research_agent.memory import get_recent_turns
 
 # Sections/turns that carry tool traces are identified by these markers.
 _TOOL_MARKERS = (

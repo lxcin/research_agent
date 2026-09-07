@@ -2,7 +2,7 @@
 import json
 import re
 import networkx as nx
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from research_agent.llm import LLMProvider
 from research_agent.store import _get_db, init_db
 

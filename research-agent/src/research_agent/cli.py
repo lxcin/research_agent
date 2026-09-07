@@ -4,7 +4,7 @@ import sys
 
 import click
 
-from research_agent.agent import chat, AgentState
+from research_agent.agent import AgentState
 from research_agent.llm import LiteLLMProvider
 from research_agent.config import get_api_key, get_model_config
 
@@ -155,7 +155,7 @@ def feature_disable(feature_id: str):
 def feature_uninstall(feature_id: str, yes: bool):
     """静态卸载一个可选功能：禁用 + 删除其全部 owned 文件/测试/数据目录."""
     from research_agent.features import (get_feature, is_core, is_enabled, set_enabled,
-                                         scan_references, FEATURES)
+                                         scan_references, dependents as feat_dependents)
     from research_agent.config import get_data_dir
     import os
     import shutil
@@ -173,6 +173,12 @@ def feature_uninstall(feature_id: str, yes: bool):
         for o in offenders[:15]:
             click.echo(f"  - {o}", err=True)
         click.echo(f"  共 {len(offenders)} 处引用。", err=True)
+        return
+
+    dependents = feat_dependents(feature_id)
+    if dependents:
+        click.echo(f"无法卸载 {feature_id}：仍有启用的功能依赖它: {', '.join(dependents)}。"
+                   f"请先卸载/禁用依赖方。", err=True)
         return
 
     if not yes:

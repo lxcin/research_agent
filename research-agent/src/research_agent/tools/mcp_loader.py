@@ -4,7 +4,6 @@ import json
 import logging
 import subprocess
 import threading
-import time
 from queue import Queue, Empty
 
 from research_agent.tools.schema import ToolSchema, ToolResult

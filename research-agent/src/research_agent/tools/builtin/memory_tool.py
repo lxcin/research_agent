@@ -81,7 +81,10 @@ def _handle_search_memory(params: dict, llm, state, emit) -> ToolResult:
     from research_agent.memory.tier_b import get_manager
     scope = _parse_scope(params.get("scope", "user"))
     kind = _parse_kind(params.get("kind", ""))
-    limit = max(1, min(int(params.get("limit", 5)), 20))
+    try:
+        limit = max(1, min(int(params.get("limit", 5)), 20))
+    except (TypeError, ValueError):
+        limit = 5
 
     hits = get_manager().retrieve(query, scope=scope, kind=kind, limit=limit)
     if not hits:

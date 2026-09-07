@@ -9,7 +9,7 @@ import uuid as _uuid
 from datetime import datetime
 from typing import Callable
 
-from research_agent.models import AgentState, Project, ProjectStatus, ConversationTurn, PendingTask, Action
+from research_agent.models import AgentState, Project, ProjectStatus, PendingTask, Action
 from research_agent.llm import LLMProvider
 from research_agent.context import build_context
 from research_agent.retrieval import is_vector_available

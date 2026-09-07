@@ -2,7 +2,6 @@
 import json
 import sqlite3
 import threading
-from pathlib import Path
 
 from research_agent.config import get_data_dir
 from research_agent.models import Paper

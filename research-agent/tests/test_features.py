@@ -72,6 +72,29 @@ def test_scan_flags_module_level_reference(tmp_path):
         feats.FEATURES.pop("_tmpfeat", None)
 
 
+def test_dependents_diagnostics_on_memory(temp_data_dir, monkeypatch):
+    """diagnostics depends on memory_tier_b → uninstalling memory must be blocked."""
+    monkeypatch.setattr("research_agent.config.get_data_dir", lambda: temp_data_dir)
+    assert feats.is_enabled("diagnostics") is True
+    deps = feats.dependents("memory_tier_b")
+    assert "diagnostics" in deps
+
+
+def test_uninstall_blocked_by_dependent(temp_data_dir, monkeypatch):
+    """memory_tier_b has enabled dependent diagnostics → uninstall refuses."""
+    from click.testing import CliRunner
+    from research_agent import cli as cli_mod
+    monkeypatch.setattr("research_agent.config.get_data_dir", lambda: temp_data_dir)
+    runner = CliRunner()
+    res = runner.invoke(cli_mod.feature, ["uninstall", "memory_tier_b", "--yes"])
+    assert res.exit_code == 0
+    assert "依赖它" in res.output
+    # nothing deleted
+    import research_agent.memory.tier_b as tb  # noqa
+    assert os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                       "src", "research_agent", "memory", "tier_b.py"))
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def test_cli_feature_list_smoke(temp_data_dir, monkeypatch):

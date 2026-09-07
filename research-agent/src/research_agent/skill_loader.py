@@ -1,5 +1,4 @@
 """External skill loader — YAML header + Markdown body."""
-import os
 import re
 import yaml
 from pathlib import Path

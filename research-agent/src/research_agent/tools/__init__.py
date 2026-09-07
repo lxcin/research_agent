@@ -1,7 +1,6 @@
 """ToolRegistry - centralized tool management with deduplication."""
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Callable
 
 from research_agent.tools.schema import ToolSchema, ToolResult, EventCallback
 

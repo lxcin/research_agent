@@ -8,7 +8,6 @@ Papers are never auto-persisted. read_paper(paper_id) lands in staging;
 read_paper(paper_id, persist=True) promotes staging → formal.
 """
 import os
-from pathlib import Path
 
 PAPERS_SUBDIR = "papers"
 TMP_SUBDIR = os.path.join(".research-agent", "tmp", "papers")

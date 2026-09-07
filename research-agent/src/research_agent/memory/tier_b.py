@@ -5,9 +5,7 @@ Hosts the MemoryManager and re-exports the models/enums so feature modules
 Kept separate from research_agent.memory.__init__ (core conversation API) so the
 whole Tier B subsystem can be disabled/uninstalled without touching core.
 """
-from research_agent.memory.models import (
-    MemoryUnit, MemoryScope, MemoryKind, row_to_unit, utcnow,
-)
+from research_agent.memory.models import MemoryUnit, MemoryScope, MemoryKind
 from research_agent.memory import storage, vector
 
 RRF_K = 60

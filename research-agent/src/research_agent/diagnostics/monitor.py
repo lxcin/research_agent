@@ -12,7 +12,6 @@ Fault categories produced (kind):
   - llm_unstable        repeated LLM call retries/failures
   - no_response         run ended without a usable final reply
 """
-import re
 from collections import Counter
 
 # Tool events that represent "search returned nothing".

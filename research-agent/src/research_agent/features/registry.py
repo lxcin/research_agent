@@ -174,6 +174,17 @@ def dependencies_met(feature_id: str) -> tuple[bool, list[str]]:
     return (not unmet, unmet)
 
 
+def dependents(feature_id: str) -> list[str]:
+    """Enabled features that declare feature_id as a dependency.
+
+    Used to block uninstalling something still depended on by an enabled feature.
+    """
+    if feature_id not in FEATURES:
+        return []
+    return [fid for fid, f in FEATURES.items()
+            if not f.core and is_enabled(fid) and feature_id in f.depends]
+
+
 # ── Reference scan (uninstall safety) ───────────────────────────────────────
 
 def _owned_module_names(f: Feature) -> list[str]:

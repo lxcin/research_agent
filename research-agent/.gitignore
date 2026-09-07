@@ -21,6 +21,8 @@ venv/
 # Data (local only, not committed)
 data/
 ~/research-agent-data/
+# Local runtime config (contains API keys if user writes keys here)
+config.yml
 
 # Docker
 .env.local

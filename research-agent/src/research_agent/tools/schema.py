@@ -1,6 +1,6 @@
 """Tool schema definitions for the tool registry."""
 from dataclasses import dataclass, field
-from typing import Callable, Any
+from typing import Callable
 
 EventCallback = Callable[[str, dict], None]
 

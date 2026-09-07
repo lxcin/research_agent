@@ -43,6 +43,9 @@ def ingest_fault_lessons(fault_kinds: dict, mgr=None, min_count: int = _MIN_COUN
     """
     if not fault_kinds:
         return 0
+    from research_agent.features import is_enabled
+    if not is_enabled("memory_tier_b"):
+        return 0
     from research_agent.memory.models import MemoryUnit, MemoryKind, MemoryScope
     if mgr is None:
         from research_agent.memory.tier_b import get_manager
