@@ -1,4 +1,4 @@
-"""Fault → Tier B memory feedback (E.5).
+﻿"""Fault → Tier B memory feedback (E.5).
 
 Repeated/typical faults discovered by diagnostics are distilled into
 DEAD_END memory units so future sessions can avoid repeating the same mistake
@@ -26,10 +26,9 @@ def _lesson_text(fault: dict) -> str:
         return (f"用户项目曾遇到工具 {tool} 连续失败（lesson: 失败后先读 stderr 诊断再重试，"
                 f"不要盲目重试相同命令）")
     if kind == "empty_streak":
-        return (f"用户项目曾连续多次检索返回空（lesson: 本地无结果立即转 search_papers 或换关键词，"
-                f"不要重复相同检索）")
+        return ("用户项目曾连续多次检索返回空（lesson: 空结果不要重复相同查询，先换关键词或换工具再试）")
     if kind == "search_exhausted":
-        return "用户项目曾耗尽搜索配额（lesson: 搜索次数有限，先精炼关键词再搜，搜到就 read_paper）"
+        return "用户项目曾耗尽检索配额（lesson: 检索次数有限，先精炼查询再发起，不要盲目重试）"
     if kind == "no_response":
         return "用户项目曾出现会话结束但无有效回复（lesson: 工具失败后应换方式回答或明确告知，不静默）"
     return f"曾发生故障: {reason}"
@@ -43,8 +42,8 @@ def ingest_fault_lessons(fault_kinds: dict, mgr=None, min_count: int = _MIN_COUN
     """
     if not fault_kinds:
         return 0
-    from research_agent.features import is_enabled
-    if not is_enabled("memory_tier_b"):
+    from research_agent.tools import is_plugin_enabled as is_enabled
+    if not is_enabled("memory"):
         return 0
     from research_agent.memory.models import MemoryUnit, MemoryKind, MemoryScope
     if mgr is None:
@@ -69,3 +68,4 @@ def ingest_fault_lessons(fault_kinds: dict, mgr=None, min_count: int = _MIN_COUN
         ))
         written += 1
     return written
+

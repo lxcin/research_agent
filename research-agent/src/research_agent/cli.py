@@ -110,117 +110,87 @@ def diagnose(limit: int, write_report: bool, use_llm: bool):
 
 
 @main.group()
-def feature():
-    """可选功能（可插拔子系统）管理：list / enable / disable / uninstall."""
+def plugin():
+    """能力插件管理（可插拔子系统）：list / enable / disable / uninstall."""
 
 
-@feature.command("list")
-def feature_list():
-    """列出所有功能及其启停状态."""
-    from research_agent.features import list_features, is_enabled, is_core
-    for f in list_features():
-        state = "core" if is_core(f.id) else ("enabled" if is_enabled(f.id) else "disabled")
-        click.echo(f"  {f.id:<18} [{state:<8}] {f.label}")
+@plugin.command("list")
+def plugin_list():
+    """列出所有插件及其启停状态."""
+    from research_agent.tools import get_registry, is_plugin_enabled
+    from research_agent.tools.builtin import register_builtins
+    register_builtins()
+    reg = get_registry()
+    for pid, p in sorted(reg.plugins.items()):
+        state = "core" if p.is_core else ("enabled" if p.enabled else "disabled")
+        tools = ",".join(t.name for t in p.tools)
+        click.echo(f"  {pid:<14} [{state:<8}] {p.label or pid}  ({tools})")
 
 
-@feature.command("enable")
-@click.argument("feature_id")
-def feature_enable(feature_id: str):
-    """启用一个可选功能."""
-    from research_agent.features import set_enabled, is_core, get_feature
-    if is_core(feature_id):
-        click.echo("core 功能不可禁用。", err=True); return
-    if get_feature(feature_id) is None:
-        click.echo(f"未知功能: {feature_id}", err=True); return
-    ok = set_enabled(feature_id, True)
+@plugin.command("enable")
+@click.argument("plugin_id")
+def plugin_enable(plugin_id: str):
+    """启用一个插件（运行时即时生效，持久化到 config）。"""
+    from research_agent.tools import get_registry
+    reg = get_registry()
+    if reg.get_plugin(plugin_id) is None:
+        click.echo(f"未知插件: {plugin_id}（先运行 plugin list）", err=True); return
+    ok = reg.enable_plugin(plugin_id)
     click.echo("已启用" if ok else "启用失败", err=not ok)
 
 
-@feature.command("disable")
-@click.argument("feature_id")
-def feature_disable(feature_id: str):
-    """禁用一个可选功能（接线点将跳过其逻辑）."""
-    from research_agent.features import set_enabled, is_core, get_feature
-    if is_core(feature_id):
-        click.echo("core 功能不可禁用。", err=True); return
-    if get_feature(feature_id) is None:
-        click.echo(f"未知功能: {feature_id}", err=True); return
-    ok = set_enabled(feature_id, False)
+@plugin.command("disable")
+@click.argument("plugin_id")
+def plugin_disable(plugin_id: str):
+    """禁用一个插件（运行时即时注销工具，持久化到 config）。"""
+    from research_agent.tools import get_registry
+    reg = get_registry()
+    p = reg.get_plugin(plugin_id)
+    if p is None:
+        click.echo(f"未知插件: {plugin_id}（先运行 plugin list）", err=True); return
+    if p.is_core:
+        click.echo(f"{plugin_id} 是 core 插件，不可禁用。", err=True); return
+    ok = reg.disable_plugin(plugin_id)
     click.echo("已禁用" if ok else "禁用失败", err=not ok)
 
 
-@feature.command("uninstall")
-@click.argument("feature_id")
+@plugin.command("uninstall")
+@click.argument("plugin_id")
 @click.option("--yes", is_flag=True, default=False, help="跳过确认")
-def feature_uninstall(feature_id: str, yes: bool):
-    """静态卸载一个可选功能：禁用 + 删除其全部 owned 文件/测试/数据目录."""
-    from research_agent.features import (get_feature, is_core, is_enabled, set_enabled,
-                                         scan_references, dependents as feat_dependents)
+def plugin_uninstall(plugin_id: str, yes: bool):
+    """卸载插件：注销工具 + 关 config + 删除其 owned 文件/测试/数据目录."""
+    from research_agent.tools import get_registry
     from research_agent.config import get_data_dir
     import os
-    import shutil
 
-    f = get_feature(feature_id)
-    if f is None:
-        click.echo(f"未知功能: {feature_id}", err=True); return
-    if is_core(feature_id):
-        click.echo(f"{feature_id} 是 core，不可卸载。", err=True); return
-
-    src_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    offenders = scan_references(feature_id, src_root)
-    if offenders:
-        click.echo(f"无法卸载 {feature_id}：仍有 core 引用（请先解除接线门控）:", err=True)
-        for o in offenders[:15]:
-            click.echo(f"  - {o}", err=True)
-        click.echo(f"  共 {len(offenders)} 处引用。", err=True)
-        return
-
-    dependents = feat_dependents(feature_id)
-    if dependents:
-        click.echo(f"无法卸载 {feature_id}：仍有启用的功能依赖它: {', '.join(dependents)}。"
-                   f"请先卸载/禁用依赖方。", err=True)
-        return
+    reg = get_registry()
+    p = reg.get_plugin(plugin_id)
+    if p is None:
+        click.echo(f"未知插件: {plugin_id}（先运行 plugin list）", err=True); return
+    if p.is_core:
+        click.echo(f"{plugin_id} 是 core 插件，不可卸载。", err=True); return
 
     if not yes:
-        owned = f.owned_files + f.owned_packages
-        click.echo(f"将卸载 {feature_id}，删除以下内容:")
+        owned = list(p.owned_files) + list(p.owned_packages)
+        click.echo(f"将卸载插件 {plugin_id}，删除以下内容:")
         for x in owned:
             click.echo(f"  - {x}")
-        for x in f.test_files:
+        for x in p.test_files:
             click.echo(f"  - {x} (test)")
-        for x in f.data_dirs:
+        for x in p.data_dirs:
             click.echo(f"  - data_dir/{x}")
         if not click.confirm("继续?"):
             click.echo("已取消"); return
 
-    deleted = []
-    # source files
-    for rel in f.owned_files:
-        p = os.path.join(src_root, rel)
-        if os.path.isfile(p):
-            os.remove(p); deleted.append(rel)
-    # owned packages (dirs/modules): research_agent.diagnostics → <src>/research_agent/diagnostics
-    for pkg in f.owned_packages:
-        parts = pkg.split(".")
-        pkg_dir = os.path.join(src_root, *parts[1:])
-        if os.path.isdir(pkg_dir):
-            shutil.rmtree(pkg_dir, ignore_errors=True); deleted.append(pkg)
-        elif os.path.isfile(pkg_dir + ".py"):
-            os.remove(pkg_dir + ".py"); deleted.append(pkg)
-    # tests
-    for rel in f.test_files:
-        p = os.path.join(src_root, rel)
-        if os.path.isfile(p):
-            os.remove(p); deleted.append(rel)
-    # data dirs
-    data_root = str(get_data_dir())
-    for d in f.data_dirs:
-        dp = os.path.join(data_root, d)
-        if os.path.isdir(dp):
-            shutil.rmtree(dp, ignore_errors=True); deleted.append(f"data_dir/{d}")
+    try:
+        reg.uninstall_plugin(plugin_id)
+    except ValueError as e:
+        click.echo(f"无法卸载: {e}", err=True); return
 
-    set_enabled(feature_id, False)
-    click.echo(f"已卸载 {feature_id} ({len(deleted)} 项)。可从 FEATURES 目录移除其声明 {feature_id}。")
+    src_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    data_root = str(get_data_dir())
+    deleted = reg.remove_plugin_disk(p, src_root, data_root)
+    click.echo(f"已卸载 {plugin_id}（注销工具 + 删除 {len(deleted)} 项磁盘内容）。")
     for d in deleted:
         click.echo(f"  - {d}")
 

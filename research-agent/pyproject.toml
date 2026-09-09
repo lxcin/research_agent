@@ -5,21 +5,27 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "research-agent"
 version = "0.1.0"
-description = "A research partner agent with persistent memory"
+description = "A general-purpose personal assistant agent harness with persistent memory"
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",
     "litellm>=1.50",
-    "chromadb>=0.5",
-    "rank-bm25>=0.2",
-    "pymupdf>=1.24",
-    "langchain-core>=0.3",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
     "httpx>=0.27",
     "pydantic>=2.0",
     "tiktoken>=0.7",
+    "pyyaml>=6.0",
+    "jieba>=0.42",
 ]
 
 [project.optional-dependencies]
+# Optional: semantic memory embedding layer (memory/vector.py). Falls back to
+# keyword search when unavailable.
+vector = [
+    "chromadb>=0.5",
+    "sentence-transformers>=2.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

@@ -264,6 +264,9 @@ def load_from_mcp(command: list[str], registry=None, manager: MCPManager | None 
             parameters=tool_info.get("inputSchema", {"type": "object", "properties": {}}),
             handler=_make_handler(name, client),
             category="mcp",
+            plugin_id="mcp",          # dynamic external-source plugin
+            group=key,                # server key → group of tools from one server
+            side_effect=True,         # unknown semantics → assume side effects possible
         )
         try:
             registry.register(schema)

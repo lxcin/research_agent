@@ -1,16 +1,19 @@
-﻿chromadb
+﻿# Runtime dependencies
+click
 fastapi
+uvicorn
 httpx
 jieba
 litellm
-networkx
-numpy
 pydantic
-PyMuPDF
-rank-bm25
-sentence-transformers
 tiktoken
-uvicorn
+pyyaml
+
+# Optional: semantic memory embedding layer (memory/vector.py). Keyword search
+# fallback works without these.
+# chromadb
+# sentence-transformers
+
+# Dev / test
 pytest
 pytest-timeout
-pyyaml

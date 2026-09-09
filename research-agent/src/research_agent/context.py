@@ -1,31 +1,22 @@
-"""Token-aware context builder for the agent harness."""
+﻿"""Token-aware context builder for the agent harness."""
 import tiktoken
 from research_agent.config import get_max_context_tokens
 from research_agent.models import AgentState, ConversationTurn
 
-BASE_SYSTEM_PROMPT = """You are PaperPilot, a research assistant.
+BASE_SYSTEM_PROMPT = """You are PaperPilot, a general personal assistant.
 
-你是 PaperPilot，一个研究助手。直接做事，不要解释过程，不要长篇计划。最终回复格式：简短结果总结 + 下一步建议（可选）。
+你是 PaperPilot，一个通用个人助手。直接做事，不要解释过程，不要长篇计划。最终回复格式：简短结果总结 + 下一步建议（可选）。
 
 回复规则：
 - 文件创建/编辑成功后：只说"已创建 xxx"或"已修改 xxx"，不要重复输出文件内容
-- 论文检索到结果后：简要列出标题和关键发现，不要照搬全文
 - 工具调用失败时：简短说明失败原因和建议
+- 涉及用户本人的问题（偏好/说过的事/领域/历史决定）：调用 search_memory 查询长期记忆后再回答，不要凭空编造
+- 用户明确要求记住某信息时：调用 memorize
 - 最终回复永远不要包含道歉、"我可以帮你"、自我评价之类的话
 - 不要在第一句说"正在xxx..."——直接给出结果
 
 工具规则：
-- file_write 成功后不要用 shell_exec 验证，除非用户要求
-- retrieve 和 search_papers 二选一
-- literature_review 是写综述的一站式工具"""
-
-
-SURVEY_WORKFLOW = """## Survey Writing Protocol / 综述写作流程
-1. retrieve/search_papers to find candidate papers / 查找候选论文
-2. BEFORE reading, check title and abstract relevance / 读前检查标题和摘要是否相关
-3. read_paper on relevant papers. Returns: title, authors, year, full_text.
-4. After reading, write survey citing with [N] format / 读完写综述，用 [N] 引用
-5. Reference list: [N] Title. Authors. Year. / 参考文献格式"""
+- file_write 成功后不要用 shell_exec 验证，除非用户要求"""
 
 
 def count_tokens(text: str) -> int:
@@ -70,8 +61,8 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
     # 4. Personal-memory meta hint (NOT memory content — content only comes via
     #    the search_memory tool which the LLM invokes itself, agentic RAG read).
     try:
-        from research_agent.features import is_enabled
-        if is_enabled("memory_tier_b"):
+        from research_agent.tools import is_plugin_enabled as is_enabled
+        if is_enabled("memory"):
             messages.append({"role": "system", "content":
                 "关于用户本人的问题（偏好/说过的事/领域/历史决定），调用 search_memory 查询长期记忆后再回答；"
                 "用户明确要求记住某信息时调用 memorize。不要凭空编造用户记忆。"})
@@ -102,9 +93,8 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
         if recent:
             messages.append({"role": "system", "content": "最近对话:\n" + format_turns(recent)})
 
-    # 5. Skill / Workflow (injected as system message before user input)
+    # 5. External skills (YAML .md files) injected as system message before user input
     user_lower = state.user_input.lower()
-    # External skills (YAML .md files) take priority over hardcoded workflow
     from research_agent.skill_loader import load_skills_from_dir, get_active_skills_context
     import os
     skills_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "skills")
@@ -112,8 +102,6 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
     skill_ctx = get_active_skills_context(external_skills, user_lower)
     if skill_ctx:
         messages.append({"role": "system", "content": skill_ctx})
-    elif any(kw in user_lower for kw in ["survey", "综述", "review", "文献调研"]):
-        messages.append({"role": "system", "content": SURVEY_WORKFLOW})
 
     # 7. User input LAST — freshest in context
     messages.append({"role": "user", "content": state.user_input})

@@ -84,8 +84,6 @@ class RunMonitor:
         name = data.get("name", "")
         sig = self._params_signature(data)
         self._tool_calls[name] += 1
-        if name in ("retrieve", "search_papers"):
-            self._search_calls += 1
         if name == self._last_tool and sig == self._last_params_sig:
             self._tool_loop_count += 1
             if self._tool_loop_count >= self.tool_loop_limit:

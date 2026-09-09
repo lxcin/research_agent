@@ -2,9 +2,6 @@
 
 
 TOOL_REQUIRED_PARAMS = {
-    "retrieve":      ["query"],
-    "search_papers": ["query"],
-    "read_paper":    ["paper_id"],
     "shell_exec":    ["command"],
     "file_write":    ["path"],
     "file_read":     ["path"],
@@ -12,8 +9,6 @@ TOOL_REQUIRED_PARAMS = {
     "file_grep":     ["pattern"],
     "file_glob":     ["pattern"],
     "check_tasks":   [],
-    "update_notes":  ["notes"],
-    "delete_paper":  ["paper_id"],
     "spawn_subagent": ["subtasks"],
 }
 
@@ -34,10 +29,5 @@ def validate_tool_params(name: str, params: dict) -> str | None:
         subtasks = params.get("subtasks", [])
         if not isinstance(subtasks, list) or len(subtasks) == 0:
             return "subtasks must be a non-empty list"
-
-    if name == "read_paper" or name == "delete_paper":
-        pid = params.get("paper_id", "")
-        if isinstance(pid, str) and not pid.strip():
-            return "paper_id must be a non-empty string"
 
     return None

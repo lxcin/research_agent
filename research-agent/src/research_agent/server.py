@@ -1,4 +1,4 @@
-"""FastAPI API server for PaperPilot (API only — no bundled frontend)."""
+﻿"""FastAPI API server for PaperPilot (API only — no bundled frontend)."""
 import json
 import uuid
 import asyncio
@@ -6,11 +6,10 @@ import os
 import threading
 import queue
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
-import tempfile
 
 from research_agent.agent import AgentState, run_agent
 
@@ -31,16 +30,16 @@ async def root():
     return {"name": "PaperPilot API", "docs": "/docs", "health": "/api/health"}
 
 
-def _feature_guard(feature_id: str, label: str = ""):
-    """Reject a request when an optional feature is disabled/uninstalled.
+def _feature_guard(plugin_id: str, label: str = ""):
+    """Reject a request when an optional plugin is disabled/uninstalled.
 
-    Turns a would-be ImportError/500 (after feature uninstall) into a clean 404
-    with an explanation, so historical API endpoints degrade gracefully.
+    Turns a would-be ImportError/500 (after plugin uninstall) into a clean 404
+    with an explanation, so capability-backed API endpoints degrade gracefully.
     """
-    from research_agent.features import is_enabled
-    if is_enabled(feature_id):
+    from research_agent.tools import is_plugin_enabled
+    if is_plugin_enabled(plugin_id):
         return
-    name = label or feature_id
+    name = label or plugin_id
     raise HTTPException(404, f"功能未启用或已卸载: {name}")
 
 
@@ -107,44 +106,6 @@ async def chat(req: ChatRequest):
                 result = run_agent(req.message, llm, state, on_event=emit,
                                    workspace_dir=workspace, chat_id=chat)
 
-                if result.retrieved_chunks:
-                    sources = list({c.get('paper_id', '') for c in result.retrieved_chunks if c.get('paper_id')})
-                    emit("sources", {"text": f"已搜索到 {len(result.retrieved_chunks)} 个片段，来自 {len(sources)} 篇论文"})
-                    paper_info = []
-                    seen = set()
-                    from research_agent.store import get_paper as db_get_paper
-                    from research_agent.vector_store import get_collection as get_vcoll
-                    vcoll = get_vcoll()
-                    for c in result.retrieved_chunks:
-                        pid = c.get("paper_id", "")
-                        if pid and pid not in seen:
-                            seen.add(pid)
-                            try:
-                                res = vcoll.get(ids=[f"{pid}_summary"])
-                                if res and res["metadatas"]:
-                                    m = res["metadatas"][0]
-                                    paper_info.append({
-                                        "id": pid,
-                                        "title": m.get("title", pid)[:120],
-                                        "authors": (m.get("authors", "").split(", ") if m.get("authors") else []),
-                                        "year": m.get("year", 0),
-                                        "abstract": (res["documents"][0] if res["documents"] else "")[:300],
-                                        "doi": m.get("doi", ""),
-                                    })
-                                    continue
-                            except Exception:
-                                pass
-                            p = db_get_paper(pid)
-                            if p:
-                                paper_info.append({
-                                    "id": pid, "title": p.title[:120], "authors": p.authors[:5],
-                                    "year": p.year, "abstract": p.abstract[:300], "doi": p.doi,
-                                })
-                            else:
-                                paper_info.append({"id": pid, "title": pid[:80], "authors": [], "year": 0, "abstract": "", "doi": ""})
-                    if paper_info:
-                        emit("citations", {"papers": paper_info})
-
                 # Chunks already streamed via _stream_response - don't re-emit
                 emit("done", {})
             except Exception as e:
@@ -191,204 +152,6 @@ async def get_workspace_info(dir: str = ""):
             return {"id": p["project_id"], "name": p.get("topic", ""),
                     "workspace_dir": p["workspace_dir"], "status": p.get("status", "active")}
     raise HTTPException(404, "Project not found")
-
-
-@app.get("/api/graph")
-async def get_graph():
-    _feature_guard("knowledge_graph", "知识图谱 API")
-    from research_agent.knowledge_graph import load_graph
-    kg = load_graph()
-    nodes, edges, node_ids = [], [], set()
-    for node_id in kg.graph.nodes:
-        node = kg.graph.nodes[node_id]
-        if node.get("type") == "paper":
-            nodes.append({
-                "id": node_id,
-                "label": node.get("title", node_id)[:50],
-                "type": "paper",
-                "meta": str(node.get("year", "")),
-            })
-            node_ids.add(node_id)
-        else:
-            claim = node.get("claim")
-            if claim:
-                nodes.append({
-                    "id": node_id,
-                    "label": claim.text[:60] if claim.text else node_id,
-                    "type": claim.claim_type if hasattr(claim, 'claim_type') else "viewpoint",
-                    "meta": getattr(claim, 'source', ''),
-                })
-                node_ids.add(node_id)
-    for u, v, data in kg.graph.edges(data=True):
-        rel = data.get("relation_type", "extends")
-        if u in node_ids and v in node_ids:
-            edges.append({"source": u, "target": v, "type": rel})
-    return {"nodes": nodes, "edges": edges}
-
-
-@app.get("/api/graph/{paper_id}")
-async def get_paper_graph(paper_id: str):
-    _feature_guard("knowledge_graph", "知识图谱 API")
-    from research_agent.knowledge_graph import build_paper_argument_tree
-    from research_agent.ingestion import recall_full_paper
-    from research_agent.llm import LiteLLMProvider
-    text = recall_full_paper(paper_id)
-    if not text:
-        raise HTTPException(404, "Paper not found")
-    llm = LiteLLMProvider()
-    return build_paper_argument_tree(paper_id, text, llm)
-
-
-@app.get("/api/papers")
-async def list_papers():
-    from research_agent.store import get_all_papers
-    papers = get_all_papers()
-    return [{
-        "id": p.id, "title": p.title, "year": p.year,
-        "authors": p.authors, "doi": p.doi,
-        "citation_count": p.citation_count, "abstract": p.abstract[:300],
-        "source_score": p.source_score,
-    } for p in papers]
-
-
-@app.delete("/api/papers/{paper_id}")
-async def delete_paper(paper_id: str):
-    _feature_guard("knowledge_graph", "论文库管理 API")
-    from research_agent.store import delete_paper, get_paper
-    from research_agent.vector_store import delete_paper as delete_vec_paper
-    paper = get_paper(paper_id)
-    if not paper:
-        raise HTTPException(404, "Paper not found")
-    delete_paper(paper_id)       # SQLite
-    delete_vec_paper(paper_id)   # ChromaDB (chunks + summary)
-    # Rebuild BM25
-    from research_agent.retrieval import build_bm25_index
-    build_bm25_index()
-    return {"status": "deleted"}
-
-
-@app.post("/api/upload/pdf")
-async def upload_pdf(file: UploadFile = File(...), dir: str = ""):
-    _feature_guard("knowledge_graph", "论文上传 API")
-    ext = (file.filename or "").lower().rsplit(".", 1)[-1] if "." in (file.filename or "") else ""
-    if ext not in ("pdf", "md", "txt"):
-        raise HTTPException(400, "Only PDF, Markdown (.md) and text (.txt) files allowed")
-
-    from research_agent.ingestion import ingest_pdf, ingest_text
-    import shutil
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
-    try:
-        if ext == "pdf":
-            paper, msg = ingest_pdf(tmp_path)
-        else:
-            with open(tmp_path, "r", encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
-            title = file.filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
-            paper, msg = ingest_text(text=text, title=title)
-        if paper:
-            if dir:
-                from research_agent import project_manager as pm
-                from research_agent.store import link_paper_to_project
-                link_paper_to_project(paper.id, pm.get_project_id(dir))
-            return {"status": "ok", "paper_id": paper.id, "title": paper.title, "message": msg}
-        return {"status": "error", "message": msg}
-    finally:
-        os.unlink(tmp_path)
-
-
-@app.get("/api/tools")
-async def list_tools():
-    from research_agent.tools import get_registry
-    from research_agent.tools.builtin import register_builtins
-    register_builtins()
-    registry = get_registry()
-    return [{"name": name, "description": t.description[:80], "category": t.category}
-            for name, t in registry.tools.items()]
-
-
-@app.get("/api/workspaces/papers")
-async def get_workspace_papers(dir: str = ""):
-    from research_agent import project_manager as pm
-    project_id = pm.get_project_id(dir)
-    from research_agent.store import get_project_papers as gpp, get_paper
-    paper_ids = gpp(project_id)
-    papers = []
-    for pid in paper_ids:
-        p = get_paper(pid)
-        if p:
-            papers.append({
-                "id": p.id, "title": p.title, "year": p.year,
-                "authors": p.authors[:3], "doi": p.doi,
-            })
-    return papers
-
-
-@app.get("/api/workspaces/paper")
-async def get_workspace_paper(dir: str = "", paper_id: str = ""):
-    if not paper_id:
-        raise HTTPException(400, "paper_id required")
-    _feature_guard("knowledge_graph", "论文库 API")
-    from research_agent.store import get_paper as gp
-    from research_agent.vector_store import get_collection as get_vcoll
-
-    p = gp(paper_id)
-    if p:
-        return {
-            "id": p.id, "title": p.title, "year": p.year,
-            "authors": p.authors, "doi": p.doi,
-            "citation_count": p.citation_count, "abstract": p.abstract[:500],
-            "source_score": p.source_score,
-        }
-
-    try:
-        vcoll = get_vcoll()
-        res = vcoll.get(ids=[f"{paper_id}_summary"])
-        if res and res["metadatas"]:
-            m = res["metadatas"][0]
-            return {
-                "id": paper_id,
-                "title": m.get("title", paper_id),
-                "authors": [a.strip() for a in m.get("authors", "").split(",") if a.strip()],
-                "year": m.get("year", 0),
-                "abstract": (res["documents"][0] if res["documents"] else "")[:500],
-                "doi": m.get("doi", ""),
-                "citation_count": 0,
-                "source_score": 5,
-            }
-    except Exception:
-        pass
-
-    try:
-        vcoll = get_vcoll()
-        res = vcoll.get(where={"doi": f"arxiv:{paper_id}"})
-        if res and res["ids"]:
-            pid_db = res["ids"][0].replace("_summary", "")
-            pp = gp(pid_db)
-            if pp:
-                return {
-                    "id": pp.id, "title": pp.title, "year": pp.year,
-                    "authors": pp.authors, "doi": pp.doi,
-                    "citation_count": pp.citation_count, "abstract": pp.abstract[:500],
-                    "source_score": pp.source_score,
-                }
-            m = res["metadatas"][0]
-            return {
-                "id": pid_db,
-                "title": m.get("title", paper_id),
-                "authors": [a.strip() for a in m.get("authors", "").split(",") if a.strip()],
-                "year": m.get("year", 0),
-                "abstract": (res["documents"][0] if res["documents"] else "")[:500],
-                "doi": m.get("doi", ""),
-                "citation_count": 0,
-                "source_score": 5,
-            }
-    except Exception:
-        pass
-
-    raise HTTPException(404, "Paper not found")
 
 
 @app.get("/api/workspaces/file")

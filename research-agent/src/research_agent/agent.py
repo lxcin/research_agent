@@ -1,28 +1,27 @@
-"""Self-implemented agent loop with function calling + tool registry."""
+﻿"""Host layer for the PaperPilot agent: workspace/project setup, tool
+registration, diagnostics wiring, and post-run persistence hooks.
+
+The actual agent strategy (loop + function calling) lives in research_agent.
+runtime (AgentRuntime / FunctionCallingRuntime) and is replaceable.
+"""
 import json
 import os
 import re
 import subprocess
 import sys
 import threading
-import uuid as _uuid
 from datetime import datetime
 from typing import Callable
 
-from research_agent.models import AgentState, Project, ProjectStatus, PendingTask, Action
+from research_agent.models import AgentState, Project, ProjectStatus, PendingTask
 from research_agent.llm import LLMProvider
-from research_agent.context import build_context
-from research_agent.retrieval import is_vector_available
 from research_agent.memory import store_turn, get_recent_turns, count_uncompressed_turns, mark_compressed
-from research_agent.store import init_db
-from research_agent.router import extract_project_topic
 from research_agent.validate import validate_response
 from research_agent.config import get_temperature, get_max_output_tokens
 from research_agent.trace_log import set_trace_id, logger
 
 MAX_ROUNDS = int(os.environ.get("RESEARCH_AGENT_MAX_ROUNDS", "50"))
 MAX_TOTAL_RETRIES = 5
-MAX_SEARCH_CALLS = int(os.environ.get("RESEARCH_AGENT_MAX_SEARCH", "10"))
 LLM_RETRY_BACKOFF = [1, 2, 4]  # seconds between retries
 
 EventCallback = Callable[[str, dict], None]
@@ -85,125 +84,10 @@ def _detect_pending_task(response: str) -> PendingTask | None:
     return None
 
 
-def _deduplicate_results(results: list[dict]) -> list[dict]:
-    seen = {}
-    for r in results:
-        pid = r.get("paper_id", r.get("id", ""))
-        if not pid:
-            continue
-        if pid not in seen:
-            seen[pid] = r
-    return list(seen.values())
-
-
-
-def _generate_msgs(messages: list[dict], state) -> list[dict]:
-    tool_msgs = [m for m in messages if m["role"] == "tool"]
-    results = []
-    for i, tm in enumerate(tool_msgs):
-        content = tm.get("content", "")[:6000]  # Trim each result
-        results.append({"role": "system", "content": f"[工具结果 {i+1}]\n{content}"})
-    return [
-        {"role": "system", "content": "=== Tool Results / 工具调用结果 (including full paper text / 含论文全文) ==="},
-        *results,
-        {"role": "system", "content": "=== End of tool results. Answer the user / 工具结果结束，回答用户问题 ==="},
-        {"role": "user", "content": state.user_input},
-    ]
-
-
 def _parse_json_flex(raw: str):
     text = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
     text = re.sub(r'\n?```\s*$', '', text)
     return json.loads(text.strip())
-
-
-def _evaluate_retrieval(llm, query: str, chunks: list[dict], on_event: EventCallback):
-    """Evaluate: Precision@5/@8/@10 + Recall via broad-search pool."""
-    if not chunks:
-        return
-    k_max = min(len(chunks), 10)
-    if k_max < 1:
-        return
-
-    # Step 1: evaluate all retrieved chunks (up to 10)
-    items_k = "\n".join([f"[{i+1}] {c.get('text', '')[:150]}" for i, c in enumerate(chunks[:k_max])])
-    prompt_k = f"""对于查询"{query}"，判断每个片段是否相关。["relevant"/"irrelevant"] JSON数组：
-
-{items_k}
-
-JSON："""
-    try:
-        raw = llm.complete([{"role": "user", "content": prompt_k}], max_tokens=300)
-        labels_k = _parse_json_flex(raw)
-    except Exception:
-        return
-    if not isinstance(labels_k, list):
-        return
-
-    # Compute precision at different k
-    def prec_at(n: int) -> float:
-        labels = labels_k[:n]
-        if not labels:
-            return 0.0
-        return sum(1 for r in labels if str(r).lower().strip() == "relevant") / len(labels)
-
-    p5 = prec_at(min(5, k_max))
-    p8 = prec_at(min(8, k_max))
-    p10 = prec_at(min(10, k_max))
-
-    top_ids = set()
-    for i, label in enumerate(labels_k):
-        if str(label).lower().strip() == "relevant" and i < len(chunks):
-            pid = chunks[i].get("paper_id", chunks[i].get("id", ""))
-            if pid:
-                top_ids.add(pid)
-
-    # Step 2: Broad search for recall pool
-    from research_agent.retrieval import hybrid_search
-    broader = hybrid_search(query, n_results=50)
-    if not broader:
-        _emit(on_event, "recall", {"query": query[:60], "p5": f"{p5:.0%}", "p8": f"{p8:.0%}",
-                "p10": f"{p10:.0%}", "recall": "N/A", "reason": "DB empty"})
-        return
-
-    # Eval broad pool (limited to 25 to save tokens)
-    pool_size = min(len(broader), 25)
-    items_broad = "\n".join([f"[{i+1}] {c.get('text', '')[:120]}" for i, c in enumerate(broader[:pool_size])])
-    prompt_broad = f"""对于查询"{query}"，判断每个片段是否相关。["relevant"/"irrelevant"] JSON数组：
-
-{items_broad}
-
-JSON："""
-    try:
-        raw = llm.complete([{"role": "user", "content": prompt_broad}], max_tokens=400)
-        labels_broad = _parse_json_flex(raw)
-    except Exception:
-        labels_broad = []
-
-    pool_ids = set()
-    if isinstance(labels_broad, list):
-        for i, r in enumerate(labels_broad):
-            if str(r).lower().strip() == "relevant" and i < len(broader):
-                pid = broader[i].get("paper_id", broader[i].get("id", ""))
-                if pid:
-                    pool_ids.add(pid)
-
-    pool_sz = len(pool_ids)
-    if pool_sz == 0:
-        _emit(on_event, "recall", {"query": query[:60], "p5": f"{p5:.0%}", "p8": f"{p8:.0%}",
-                "p10": f"{p10:.0%}", "recall": "N/A", "reason": "no relevant in DB", "pool": 0})
-        return
-
-    recall_hits = len(top_ids & pool_ids)
-    recall_val = recall_hits / pool_sz
-
-    _emit(on_event, "recall", {
-        "query": query[:60],
-        "p5": f"{p5:.0%}", "p8": f"{p8:.0%}", "p10": f"{p10:.0%}",
-        "recall": f"{recall_val:.0%}",
-        "recall_hits": recall_hits,
-        "recall_pool": pool_sz,
-    })
 
 
 def _call_llm_with_tools(llm: LLMProvider, messages: list[dict],
@@ -319,6 +203,32 @@ def _auto_validate(state, tc_name, tc_params, messages, on_event):
         _emit(on_event, "thinking", {"text": f"自动验证失败: {path} - {error_stderr.strip()[:100]}"})
 
 
+def _tool_approval_hook(state, tool_name: str, params: dict, emit) -> str | None:
+    """Host-injected pre-dispatch policy: guardrail + HITL approval.
+
+    Called by the runtime before any tool dispatch (runtime is tool-agnostic).
+    Returns None to allow, or a block reason to reject. Currently guards the
+    shell command tool; the guardrail knows tool semantics, not the kernel.
+    """
+    if tool_name != "shell_exec":
+        return None
+    from research_agent.guardrail import guardrail as g_rail
+    from research_agent.models import Action
+    import uuid as _uuid
+    block_reason = g_rail(Action(action=tool_name, query=params.get("command", "")))
+    if not block_reason:
+        return None
+    confirm_id = str(_uuid.uuid4())[:8]
+    command_text = params.get("command", "")
+    _emit(emit, "confirm_required", {
+        "id": confirm_id, "tool": tool_name,
+        "command": command_text[:200], "reason": block_reason})
+    state._pending_confirms[confirm_id] = {"event": threading.Event(), "approved": False}
+    state._pending_confirms[confirm_id]["event"].wait(timeout=60)
+    confirmed = state._pending_confirms.pop(confirm_id, {}).get("approved", False)
+    return None if confirmed else f"User cancelled: {block_reason}"
+
+
 def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
               on_event: EventCallback = None,
               workspace_dir: str = "", chat_id: str = "") -> AgentState:
@@ -326,7 +236,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     logger.info(f"run_agent START: {user_input[:80]}")
 
     # ── Diagnostics: record every event + run fault monitor (side-channel) ──
-    from research_agent.features import is_enabled
+    from research_agent.tools import is_plugin_enabled as is_enabled
     _diag_on = is_enabled("diagnostics")
     from research_agent.diagnostics.recorder import EventRecorder
     from research_agent.diagnostics.monitor import RunMonitor
@@ -387,7 +297,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     # Auto-load MCP servers from config (feature-gated: skip entirely when disabled)
     if os.environ.get("RESEARCH_AGENT_MCP", "1") == "1":
         try:
-            from research_agent.features import is_enabled
+            from research_agent.tools import is_plugin_enabled as is_enabled
             if is_enabled("mcp"):
                 from research_agent.tools.mcp_loader import MCPManager
                 mcp_config = os.path.join(
@@ -410,55 +320,27 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     registry = get_registry()
 
     state.user_input = user_input
-    init_db()
 
-    # ── Project init / load ──
+    # ── Ensure a workspace/project binding (clean default when none given) ──
     from research_agent import project_manager as pm
-    if workspace_dir:
-        if not pm.is_project_dir(workspace_dir):
-            topic = extract_project_topic(user_input)
-            if len(topic) > 20:
-                try:
-                    resp = llm.complete(
-                        [{"role": "user", "content": f"Extract a concise project topic (max 5 words) from: {topic}\nOutput ONLY the topic name."}],
-                        max_tokens=30,
-                    )
-                    topic = resp.strip()
-                except Exception:
-                    topic = topic[:40]
-            proj = pm.init_project(workspace_dir, topic)
-            os.makedirs(os.path.join(workspace_dir, "papers"), exist_ok=True)
-            os.makedirs(os.path.join(workspace_dir, "experiments"), exist_ok=True)
-            try:
-                from research_agent.tools.git_tool import git_init
-                git_init(workspace_dir)
-            except Exception:
-                pass
-        else:
-            proj = pm.load_project(workspace_dir)
-    else:
-        # No workspace selected — use a default temp workspace so file tools work
+    if not workspace_dir:
         from research_agent.config import get_data_dir
         workspace_dir = str(get_data_dir() / "workspaces" / "default")
-        if not pm.is_project_dir(workspace_dir):
-            topic = extract_project_topic(user_input)
-            if len(topic) > 20:
-                try:
-                    resp = llm.complete(
-                        [{"role": "user", "content": f"Extract a concise project topic (max 5 words) from: {topic}\nOutput ONLY the topic name."}],
-                        max_tokens=30,
-                    )
-                    topic = resp.strip()
-                except Exception:
-                    topic = topic[:40]
-            proj = pm.init_project(workspace_dir, topic)
-        else:
-            proj = pm.load_project(workspace_dir)
-        os.makedirs(os.path.join(workspace_dir, "papers"), exist_ok=True)
-        os.makedirs(os.path.join(workspace_dir, "experiments"), exist_ok=True)
+    if not pm.is_project_dir(workspace_dir):
+        import os as _os
+        _os.makedirs(workspace_dir, exist_ok=True)
+        label = _os.path.basename(_os.path.normpath(workspace_dir)) or "default"
+        proj = pm.init_project(workspace_dir, topic=label)
+        try:
+            from research_agent.tools.git_tool import git_init
+            git_init(workspace_dir)
+        except Exception:
+            pass
+    else:
+        proj = pm.load_project(workspace_dir)
 
     state.active_project = Project(
-        id=pm.get_project_id(workspace_dir) if workspace_dir else "",
+        id=pm.get_project_id(workspace_dir),
         topic=(proj or {}).get("topic", "默认项目"),
         status=ProjectStatus.ACTIVE,
         workspace_dir=workspace_dir,
@@ -469,219 +351,33 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     state.conversation_turns = get_recent_turns(workspace_dir, chat_id, limit=20)
 
     tools_list = registry.list_for_llm()
+    # ── Run the (replaceable) agent kernel ──
+    from research_agent.runtime import RuntimeContext, FunctionCallingRuntime
 
-    # ── Agent loop with function calling ──
-    consecutive_empty = 0
-    total_search_rounds = 0
-    total_retries = 0
-    consecutive_retrieve_few = 0
-    search_papers_found = False  # trigger dynamic tool filtering
+    def _call_tools_patchable(llm, messages, tools, tool_choice="auto"):
+        # resolve current module attr so tests' patch('...agent._call_llm_with_tools') applies
+        import research_agent.agent as _ag
+        return _ag._call_llm_with_tools(llm, messages, tools, tool_choice)
 
-    model_name = getattr(llm, "model", "")
-    messages = build_context(state, registry, model_name)
-    messages.insert(1, {"role": "system", "content": registry.generate_capabilities()})
+    def _stream_patchable(llm, messages, emit):
+        import research_agent.agent as _ag
+        return _ag._stream_response(llm, messages, emit)
 
-    for round_num in range(1, MAX_ROUNDS + 1):
-        state.round_count = round_num
-        # Dynamic filtering: after search_papers finds results, remove retrieve
-        # to force read_paper — LLM cannot access arXiv results via retrieve
-        if search_papers_found:
-            tools_list = [t for t in tools_list if t["function"]["name"] != "retrieve"]
-
-        if total_search_rounds >= 3 and consecutive_empty >= 2:
-            _emit(on_event, "thinking", {"text": "已尝试多次搜索无果，直接回答..."})
-            state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)
-            break
-        if total_search_rounds >= MAX_SEARCH_CALLS:
-            _emit(on_event, "thinking", {"text": f"检索次数已达上限({MAX_SEARCH_CALLS})，选最好的论文用 read_paper 读，或直接基于当前结果回答"})
-            messages.append({"role": "system",
-                "content": f"检索次数已达上限({MAX_SEARCH_CALLS}次)。请从已有结果中选出最相关的论文用 read_paper 阅读，或直接基于当前检索结果回答。不要再调用 search_papers。"})
-            # Don't reset counter — keep blocking subsequent calls
-        if total_retries >= MAX_TOTAL_RETRIES:
-            _emit(on_event, "thinking", {"text": "重试次数已达上限"})
-            state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)
-            break
-
-        try:
-            response = _call_llm_with_retry(
-                lambda: _call_llm_with_tools(llm, messages, tools_list, "auto"),
-                on_event,
-            )
-        except Exception as e:
-            total_retries += 1
-            _emit(on_event, "thinking", {"text": f"模型调用失败 (尝试 {total_retries}/{MAX_TOTAL_RETRIES}): {str(e)[:100]}"})
-            messages.append({"role": "system", "content": f"模型调用失败: {e}。请调整参数重试。"})
-            if total_retries >= MAX_TOTAL_RETRIES:
-                state.final_response = f"抱歉，模型多次调用失败。"
-                _save_turn(state, workspace_dir, chat_id)
-                _finish_run()
-                return state
-            continue
-
-        # ── Process tool calls ──
-        tool_calls = response.get("tool_calls", [])
-        round_action_names = [tc["name"] for tc in tool_calls] if tool_calls else []
-        if tool_calls:
-            messages.append({
-                "role": "assistant", "content": None,
-                "tool_calls": [
-                    {"id": tc["id"], "type": "function",
-                     "function": {"name": tc["name"], "arguments": json.dumps(tc["params"])}}
-                    for tc in tool_calls
-                ],
-            })
-
-            round_retry = 0
-            round_has_errors = False
-            for tc in tool_calls:
-                tc_id = tc["id"]
-                tc_name = tc["name"]
-                tc_input = tc["params"]
-
-                _emit(on_event, "tool_start", {"id": tc_id, "name": tc_name, "input": tc_input})
-                state._current_tool_id = tc_id
-
-                # ── Guardrail: HITL confirmation for dangerous commands ──
-                if tc_name == "shell_exec":
-                    from research_agent.guardrail import guardrail as g_rail
-                    block_reason = g_rail(Action(action=tc_name, query=tc_input.get("command", "")))
-                    if block_reason:
-                        confirm_id = str(_uuid.uuid4())[:8]
-                        command_text = tc_input.get("command", "")
-                        _emit(on_event, "confirm_required", {
-                            "id": confirm_id,
-                            "tool": tc_name,
-                            "command": command_text[:200],
-                            "reason": block_reason
-                        })
-                        confirm_event = threading.Event()
-                        state._pending_confirms[confirm_id] = {"event": confirm_event, "approved": False}
-                        confirm_event.wait(timeout=60)
-                        confirmed = state._pending_confirms.pop(confirm_id, {}).get("approved", False)
-                        if not confirmed:
-                            cancel_msg = f"User cancelled: {block_reason}"
-                            _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": cancel_msg}})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                             "content": json.dumps({"error": cancel_msg}, ensure_ascii=False)})
-                            continue
-
-                if tc["name"] in ("retrieve", "search_papers"):
-                    total_search_rounds += 1
-
-                # Block search_papers after limit
-                if tc["name"] == "search_papers" and total_search_rounds >= MAX_SEARCH_CALLS:
-                    hint = f"搜索次数已达上限({MAX_SEARCH_CALLS})。请用 read_paper 或直接基于已有结果回答。"
-                    _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": hint}})
-                    messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                     "content": json.dumps({"error": hint}, ensure_ascii=False)})
-                    continue
-
-                # Validate tool params before dispatch
-                from research_agent.tools.validate_params import validate_tool_params
-                param_err = validate_tool_params(tc["name"], tc["params"])
-                if param_err:
-                    total_retries += 1; round_retry += 1; round_has_errors = True
-                    _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": param_err}})
-                    messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                     "content": json.dumps({"error": param_err}, ensure_ascii=False)})
-                    continue
-
-                result = registry.dispatch(tc["name"], tc["params"], llm, state, on_event)
-
-                if not result.success and result.data.get("error"):
-                    total_retries += 1; round_retry += 1; round_has_errors = True
-                    err_detail = result.data.get("error", "")
-                    if "stderr" in result.data and result.data["stderr"]:
-                        err_detail += f"\nstderr: {result.data['stderr'][:500]}"
-                    if "stdout" in result.data and result.data["stdout"]:
-                        err_detail += f"\nstdout: {result.data['stdout'][:300]}"
-                    hint = f"工具'{tc['name']}'失败: {err_detail}"
-                    if round_retry >= 2:
-                        hint += " 请换其他方式回答。"
-                    _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": result.data["error"]}})
-                    messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                     "content": json.dumps({"error": hint}, ensure_ascii=False)})
-                    continue
-
-                # Also catch shell_exec returning success=False in data
-                if tc["name"] == "shell_exec" and result.data.get("success") is False:
-                    stderr = result.data.get("stderr", "")
-                    stdout = result.data.get("stdout", "")[:300]
-                    err = stderr or result.data.get("returncode", "")
-                    if stderr:
-                        hint = f"Command failed (exit {result.data.get('returncode', '?')}): {stderr.strip()[:200]}"
-                    else:
-                        hint = f"Command failed with exit code {result.data.get('returncode', '?')}"
-                    _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": hint[:100]}})
-                    messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                     "content": json.dumps({"error": hint, "stdout": stdout}, ensure_ascii=False)})
-                    continue
-
-                # Success
-                _emit(on_event, "tool_end", {"id": tc_id, "name": tc_name, "status": "success", "output": result.data})
-                messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                 "content": json.dumps(result.data, ensure_ascii=False)})
-
-                if tc_name in ("file_write", "file_edit"):
-                    _auto_validate(state, tc_name, tc["params"], messages, on_event)
-
-                if tc["name"] == "search_papers" and result.data.get("found", 0) > 0:
-                    search_papers_found = True
-
-                if result.chunks:
-                    state.retrieved_context = _deduplicate_results(result.chunks)
-                    state.retrieved_chunks = state.retrieved_context
-                    consecutive_empty = 0
-                    if tc["name"] == "retrieve":
-                        if len(result.chunks) < 3:
-                            consecutive_retrieve_few += 1
-                        else:
-                            consecutive_retrieve_few = 0
-                        # P/R instrumentation was tied to vector RAG (retired in V4).
-                        if llm and is_vector_available():
-                            try:
-                                _evaluate_retrieval(llm, tc["params"].get("query", ""), result.chunks, on_event)
-                            except Exception:
-                                pass
-                elif tc["name"] in ("retrieve", "search_papers") and not result.success:
-                    consecutive_empty += 1
-                    _emit(on_event, "thinking", {"text": f"{tc['name']} 返回空结果 (连续 {consecutive_empty} 次)"})
-                    if tc["name"] == "retrieve":
-                        consecutive_retrieve_few += 1
-
-            if consecutive_empty >= 3:
-                _emit(on_event, "thinking", {"text": "连续搜索无果，直接回答..."})
-                state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)
-                break
-            if consecutive_retrieve_few >= 2:
-                _emit(on_event, "thinking", {"text": "本地结果不足，建议使用 search_papers"})
-                messages.append({"role": "system", "content": "本地检索结果较少（<3条），建议使用 search_papers 搜索 arXiv 获取更多论文。"})
-                consecutive_retrieve_few = 0
-            # Auto-checkpoint after successful rounds with file/shell operations
-            try:
-                from research_agent.tools.git_tool import git_checkpoint, should_auto_checkpoint
-                if state.active_project:
-                    from research_agent.tools.builtin.filesystem import _get_project_dir
-                    ws = _get_project_dir(state)
-                    if ws and os.path.isdir(os.path.join(ws, ".git")) and should_auto_checkpoint(round_action_names, round_has_errors):
-                        git_checkpoint(ws, f"round_{round_num}: auto checkpoint")
-            except Exception:
-                pass
-            continue
-
-        # ── No tool calls → text response ──
-        # Keep tool results so LLM can reference what was done
-        clean_msgs = [m for m in messages if m["role"] in ("system", "user", "tool", "assistant")]
-        clean_msgs.append({"role": "system",
-            "content": "基于以上工具调用结果和对话历史，用简洁的方式总结你完成了什么、结果如何。引用具体数据但不要重复完整内容。使用与用户相同的语言。"})
-        clean_msgs.append({"role": "user", "content": state.user_input})
-        state.final_response = _stream_response(llm, clean_msgs, on_event)
-        break
-
-    # ── If no response generated yet (shouldn't happen with function calling) ──
-    if not state.final_response:
-        state.final_response = _stream_response(llm, _generate_msgs(messages, state), on_event)
-
+    ctx = RuntimeContext(
+        llm=llm,
+        user_input=user_input,
+        state=state,
+        registry=registry,
+        workspace_dir=workspace_dir,
+        chat_id=chat_id,
+        emit=on_event,
+        pre_tool_hook=_tool_approval_hook,
+        on_tool_success=_auto_validate,
+        max_rounds=MAX_ROUNDS,
+        call_llm_with_tools=_call_tools_patchable,
+        stream_response=_stream_patchable,
+    )
+    FunctionCallingRuntime().run(ctx)
     # ── Stream final response ──
     state = validate_response(state)
     _save_turn(state, workspace_dir, chat_id)
@@ -693,7 +389,7 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
     if os.environ.get("RESEARCH_AGENT_SEMANTIC_CHECK", "0") == "1":
         try:
             from research_agent.validate import run_semantic_check
-            issues = run_semantic_check(state, messages=messages, llm=llm)
+            issues = run_semantic_check(state, llm=llm)
             for iss in issues:
                 recorder.record("semantic_issue", iss)
                 if on_event:
@@ -723,9 +419,9 @@ def _maybe_distill(state: AgentState, workspace_dir: str, chat_id: str, llm: LLM
     if not workspace_dir or not chat_id:
         return
     try:
-        from research_agent.features import is_enabled
+        from research_agent.tools import is_plugin_enabled as is_enabled
         from research_agent.config import get_memory_config
-        if not is_enabled("memory_tier_b") or not get_memory_config().get("enabled", True):
+        if not is_enabled("memory") or not get_memory_config().get("enabled", True):
             return
         from research_agent.memory import source as mem_source
         from research_agent.memory import pipeline as mem_pipeline
@@ -824,9 +520,9 @@ def _persist_pending_task(state: AgentState, task: PendingTask):
     are just conversational filler (e.g. generic offers without an action).
     """
     try:
-        from research_agent.features import is_enabled
+        from research_agent.tools import is_plugin_enabled as is_enabled
         from research_agent.config import get_memory_config
-        if not is_enabled("memory_tier_b") or not get_memory_config().get("enabled", True):
+        if not is_enabled("memory") or not get_memory_config().get("enabled", True):
             return
         from research_agent.memory.models import MemoryUnit, MemoryKind, MemoryScope
         from research_agent.memory.tier_b import get_manager
@@ -866,8 +562,7 @@ def chat(message: str, state: AgentState | None = None, thread_id: str = "defaul
     else:
         state.user_input = message
         state.retry_count = 0
-        state.retrieved_chunks = []
-        state.retrieved_context = []
         state.final_response = ""
         state.error = ""
     return process_user_input(state, thread_id=thread_id)
+

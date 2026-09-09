@@ -1,20 +1,20 @@
-# tests/test_feature_gating.py — runtime gating for optional features
+# tests/test_feature_gating.py — runtime enable/disable gating for plugins
 import pytest
 
-from research_agent import features as feats
 from research_agent.tools import get_registry
 from research_agent.tools.builtin import register_builtins
 
 
 @pytest.fixture
 def clean_registry(temp_data_dir):
-    """Isolated registry so tool sync tests don't pollute other suites."""
+    """Registry with memory plugin enabled/disabled cleanly."""
     reg = get_registry()
+    # ensure clean enabled state (drop any stale config)
     for name in ("memorize", "search_memory"):
         reg.unregister(name)
+    if reg.get_plugin("memory"):
+        reg._set_plugin_config("memory", True)
     yield reg
-    for name in ("memorize", "search_memory"):
-        reg.unregister(name)
 
 
 def test_register_builtins_registers_memory_tools_when_enabled(clean_registry):
@@ -23,34 +23,40 @@ def test_register_builtins_registers_memory_tools_when_enabled(clean_registry):
     assert "search_memory" in clean_registry
 
 
-def test_register_builtins_unregisters_when_disabled(clean_registry, monkeypatch):
-    """Feature disable must remove its tools on next register_builtins()."""
-    import research_agent.features as feats_pkg
-    monkeypatch.setattr(feats_pkg, "is_enabled", lambda fid: fid != "memory_tier_b")
+def test_disable_plugin_unregisters_memory_tools(clean_registry):
+    """Runtime disable removes memory tools immediately."""
     register_builtins()
+    assert "memorize" in clean_registry
+    assert clean_registry.disable_plugin("memory") is True
     assert "memorize" not in clean_registry
     assert "search_memory" not in clean_registry
     # re-enable path
-    monkeypatch.setattr(feats_pkg, "is_enabled", lambda fid: True)
-    register_builtins()
+    assert clean_registry.enable_plugin("memory") is True
     assert "memorize" in clean_registry
+
+
+def test_uninstall_plugin_persists_disabled(clean_registry):
+    register_builtins()
+    assert clean_registry.uninstall_plugin("memory", force=True) is True
+    assert "memory" not in clean_registry.plugins
+    assert "memorize" not in clean_registry
 
 
 def test_server_feature_guard_404_when_disabled(monkeypatch):
     from fastapi import HTTPException
     from research_agent import server as srv
-    import research_agent.features as feats_pkg
-    monkeypatch.setattr(feats_pkg, "is_enabled", lambda fid: False)
+    import research_agent.tools as tools_pkg
+    monkeypatch.setattr(tools_pkg, "is_plugin_enabled", lambda pid, default=True: False)
     with pytest.raises(HTTPException) as exc:
-        srv._feature_guard("knowledge_graph", "论文库")
+        srv._feature_guard("memory", "记忆")
     assert exc.value.status_code == 404
 
 
 def test_server_feature_guard_pass_when_enabled(monkeypatch):
     from research_agent import server as srv
-    import research_agent.features as feats_pkg
-    monkeypatch.setattr(feats_pkg, "is_enabled", lambda fid: True)
-    srv._feature_guard("knowledge_graph")  # must not raise
+    import research_agent.tools as tools_pkg
+    monkeypatch.setattr(tools_pkg, "is_plugin_enabled", lambda pid, default=True: True)
+    srv._feature_guard("memory")  # must not raise
 
 
 def test_memory_tool_limit_guard():
