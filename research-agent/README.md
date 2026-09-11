@@ -1,65 +1,86 @@
-# PaperPilot — Research Coding Agent Harness
+# PaperPilot — Personal-Assistant Agent Harness
 
-PaperPilot is a self-implemented ReAct-style agent loop with pluggable tools, governance guardrails, feedback loops, and workspace management. Unlike ChatGPT, it runs tools deterministically on your filesystem with safety boundaries — search papers, read full text, reproduce experiments, write surveys, all in one chat interface. V4 adds two-tier memory (papers as grep-able working memory + personal long-term memory) and developer-facing fault diagnostics.
+PaperPilot is a from-scratch AI agent framework (not a LangGraph/Dify wrapper) built around two ideas: **a replaceable agent kernel** and **everything-else-is-a-capability-plugin**. It runs an LLM function-calling loop with deterministic governance, pluggable tools, conversation-level agentic-RAG memory, and developer-facing observability.
 
-PaperPilot 是一个自实现的 ReAct 风格 Agent 循环，内置可插拔工具、治理护栏、反馈回路和项目空间管理。与 ChatGPT 不同，它在本地文件系统上确定性执行工具操作，并设有安全边界 —— 搜索论文、阅读全文、复现实验、撰写综述，一站式完成。V4 新增双层记忆（论文作为可 grep 的工作记忆 + 个人长期记忆）与面向开发者的故障诊断。
+PaperPilot 是一个自研的 AI Agent 框架（非 LangGraph/Dify 套壳），围绕两个理念设计：**可替换的 Agent 内核** 与 **一切皆能力插件**。它运行 LLM function-calling 循环，内置确定性治理、可插拔工具、对话级 agentic-RAG 记忆，以及面向开发者的可观测性。
+
+```
+Host shell (agent.py)          lifecycle: workspace binding · diagnostics · post-run hooks
+        │
+        ▼
+AgentRuntime (runtime.py)      REPLACEABLE kernel: loop + function calling
+        │                        governance/validation injected via RuntimeContext
+        ▼
+Tool plugins (tools/)          filesystem · shell · subagent · memory · diagnostics · mcp
+```
+
+---
+
+## 亮点 (Highlights)
+
+- **可替换内核 (Replaceable kernel)** — `AgentRuntime` host/strategy split: the loop knows no concrete tool; governance, tools and context arrive via `RuntimeContext`. Swap the loop (while-ReAct → other strategies) without touching capabilities.
+- **两级工具插件 (Two-level plugins)** — `ToolSchema` (agent-facing granularity: each callable tool) vs `ToolPlugin` (engineering unit: cohesive domain + lifecycle). Runtime install / enable / disable / uninstall with dependency checks and disk-footprint cleanup.
+- **纵深治理 (Deterministic governance)** — regex guardrail + path sandbox + HITL approval + post-write `py_compile/pytest` self-correction. All mock-testable, no API key/network.
+- **对话级 agentic RAG 记忆 (Conversation-level agentic RAG)** — small-model distillation into typed `MemoryUnit`s; the agent autonomously formulates retrieval queries from dialogue and calls the `search_memory` tool. Hybrid keyword + vector (RRF) recall.
+- **可观测性 (Observability)** — every agent event lands in a JSONL event stream; `RunMonitor` detects stalls/repeated-tool/error-streaks; `diagnose` CLI produces reports.
 
 ---
 
 ## 快速开始 (Quick Start)
 
 ```bash
-# 安装
-pip install git+https://github.com/lxcin/research_agent.git
-
-# 或本地安装
 git clone https://github.com/lxcin/research_agent.git
 cd research_agent
 pip install -e .
 
-# 启动 CLI（主要交互方式）
+# 配置 API Key
+export DEEPSEEK_API_KEY=sk-xxx      # 或写入 ~/research-agent-data/config.yml
+
+# 交互式 CLI（主要入口）
 research-agent chat
 
-# 启动 API 服务（可选）
-PYTHONPATH=src python -m uvicorn research_agent.server:app --host 0.0.0.0 --port 8050
+# 能力插件管理
+research-agent plugin list
+research-agent plugin disable memory
+
 # 开发者诊断
 research-agent diagnose
-research-agent feature list
+
+# 纯 API 服务（可选）
+PYTHONPATH=src python -m uvicorn research_agent.server:app --host 0.0.0.0 --port 8050
+# → /docs, /api/chat (SSE), /api/diagnostics, ...
 ```
 
-**依赖**: Python 3.11+
+**依赖**: Python 3.11+ · 可选向量层: `pip install -e ".[vector]"`（`sentence-transformers` + `chromadb`）
 
 ---
 
-## API Key 安全配置 (Security Configuration)
+## 架构分层 (Architecture)
 
-**方式一：环境变量 (Recommended)**
-```bash
-DEEPSEEK_API_KEY=sk-xxx
-```
-Supported providers: DeepSeek, OpenAI, Anthropic, OpenAI-compatible.
+| 层 | 文件 | 职责 |
+|----|------|------|
+| **Host 外壳** | `agent.py` | workspace/project 绑定、插件装载、诊断包装、回合后横切（持久化/压缩/记忆提炼） |
+| **Kernel 内核** | `runtime.py` | `AgentRuntime` 接口 + `FunctionCallingRuntime`（while 循环 + function calling + 通用收敛） |
+| **Capabilities 插件** | `tools/` | `ToolSchema`（Agent 粒度）+ `ToolPlugin`（工程粒度，可装卸） |
+| **Memory 记忆** | `memory/` | 对话持久化（core）+ Tier B 个人长期记忆 |
+| **Diagnostics 诊断** | `diagnostics/` | 事件流 / 监控 / 扫描 / 报告 / 记忆回写 |
 
-**方式二：config.yml (⚠ 明文存储风险)**
-Write the key into `~/research-agent-data/config.yml`. Plaintext on disk — do not use in shared environments.
-
-**安全红线：**
-- **NEVER** hardcode API keys in source code
-- **NEVER** commit API keys to git
-- **NEVER** log API keys
-- CI credential check enforces these rules
+**内核契约**：`RuntimeContext` 注入 `llm / state / registry / emit`、前置审批钩子 `pre_tool_hook`、写入校验钩子 `on_tool_success`、可替换的 LLM 调用原语。内核永远不认识任何具体工具名。
 
 ---
 
-## 分发方式 (Distribution)
+## 能力插件 (Capability Plugins)
 
-| 形态 | 命令 | 说明 |
-|------|------|------|
-| **CLI** | `pip install git+https://github.com/lxcin/research_agent.git` → `research-agent chat` | 命令行交互（主要入口） |
-| **Docker** | `docker compose up` | 后端 API :8050 |
-| **API** | `uvicorn research_agent.server:app` | 纯 API（/api/*、/docs） |
-| **源码** | [GitHub Release](https://github.com/lxcin/research_agent/releases) | 下载源码 zip |
+| 插件 | 工具 | 类型 | 说明 |
+|------|------|------|------|
+| `filesystem` | file_read / file_write / file_edit / file_glob / file_grep | core | 工作区文件操作，路径沙箱 |
+| `shell` | shell_exec / check_tasks | core | 命令执行与后台任务（`shell_exec` 需审批） |
+| `subagent` | spawn_subagent | core | 并行子代理编排 |
+| `memory` | memorize / search_memory | optional | 个人长期记忆（写入 / 主动召回） |
+| `diagnostics` | —（行为插件） | optional | 事件流、故障监控、报告 |
+| `mcp` | 动态 | optional | 从外部 MCP server 动态装载工具 |
 
-> V4 起不再捆绑 Web/Desktop 前端；交互以 CLI 为主，未来重构为逐文件提案式（git diff + keep/undo）。
+`research-agent plugin list` 查看；插件开关持久化到 `config.yml` 的 `plugins.<id>.enabled`。
 
 ---
 
@@ -67,95 +88,82 @@ Write the key into `~/research-agent-data/config.yml`. Plaintext on disk — do 
 
 ```
 research-agent/
-├── src/research_agent/        # Backend harness + API
-│   ├── agent.py               # Agent loop — ReAct-style main loop (function calling)
-│   ├── context.py             # Token-aware layered context builder
-│   ├── server.py              # FastAPI 纯 API（/api/chat SSE 流式等）
-│   ├── cli.py                 # CLI: chat / diagnose / feature 子命令
-│   ├── llm.py / config.py     # LLM 抽象 + 配置(API key, data_dir, memory)
-│   ├── guardrail.py / validate.py / trace_log.py   # 治理/反馈/追踪
-│   ├── project_manager.py     # 项目/对话 JSON 存储（workspace 模型）
-│   ├── paper_store.py         # 论文 .md 正式区/临时区两阶段布局
-│   ├── retrieval.py           # grep_papers 关键词检索（jieba）
-│   ├── search.py              # arXiv API 客户端
-│   ├── store.py               # SQLite（历史论文元数据/项目关联）
-│   ├── memory/                # 对话持久化(core) + Tier B 个人记忆(tier_b/…)
-│   ├── diagnostics/           # 事件流/监控/scan/report/feedback
-│   ├── features/              # 可插拔 Feature 注册表(list/enable/disable/uninstall)
-│   ├── knowledge_graph.py / ingestion.py / vector_store.py  # 历史 API(可选 feature)
-│   └── tools/                 # ToolRegistry + builtin/subagent/arxiv_pdf/mcp_loader/git_tool
-├── skills/                    # 外部技能定义（YAML 头 + Markdown）
-├── my_tools/                  # 用户自定义工具（.py）
-├── tests/                     # Mock-LLM 确定性测试（pytest）
-├── Dockerfile.backend         # 后端容器
-├── docker-compose.yml         # 编排（仅 backend）
-├── render.yaml                # Render.com 部署
-└── requirements.txt / pyproject.toml
+├── src/research_agent/
+│   ├── agent.py            # Host shell（装配 + 回合后横切）
+│   ├── runtime.py          # 可替换内核：AgentRuntime / FunctionCallingRuntime
+│   ├── context.py          # 令牌感知的分层上下文构建
+│   ├── cli.py              # CLI: chat / diagnose / plugin
+│   ├── server.py           # FastAPI 纯 API（SSE 流式）
+│   ├── llm.py  config.py   # LLM 抽象 · 配置(API key / data_dir / plugins)
+│   ├── guardrail.py  validate.py  trace_log.py   # 治理 / 校验 / 追踪
+│   ├── models.py  project_manager.py             # 状态模型 · 会话/工作区存储
+│   ├── memory/             # 对话持久化(core) + Tier B 记忆(tier_b/…)
+│   ├── diagnostics/        # recorder / monitor / scan / report / feedback
+│   └── tools/
+│       ├── schema.py       # ToolSchema + ToolPlugin
+│       ├── __init__.py     # ToolRegistry（插件 install/uninstall/enable/disable）
+│       ├── builtin/        # filesystem · memory_tool · 插件声明
+│       ├── mcp_loader.py   # MCP 客户端（动态工具）
+│       ├── subagent.py     # 子代理
+│       └── git_tool.py     # git checkpoint/rollback
+├── skills/                 # 外部技能定义（YAML 头 + Markdown）
+├── my_tools/               # 用户自定义工具（.py）
+├── tests/                  # Mock-LLM 确定性测试 + 评测脚本
+├── Dockerfile.backend      # 后端容器
+├── docker-compose.yml      # 编排（仅 backend）
+└── CHANGELOG.md  README.md  pyproject.toml
+```
+
+---
+
+## 记忆：对话级 Agentic RAG
+
+写入（回合后异步）：对话 → 小模型蒸馏为 `MemoryUnit`（事实/偏好/决策/踩坑）→ 去重/冲突检测 → SQLite（+ 可选向量）。
+
+读取（Agent 自主）：LLM 判断是否需要记忆 → **从多轮对话中提炼自包含检索词** → 调用 `search_memory` 工具 → 混合召回（jieba 关键词 + `bge-small-zh` 向量 + RRF）→ 接地回答。与文件工作记忆物理隔离。
+
+**可复现评测**（`tests/eval_*.py`）：
+
+| 评测 | 结果 |
+|------|------|
+| 检索器（48 单元 / 27 查询，含 hard-negative） | 混合召回 **Recall@5 62.8% → 81.7%**，MRR 0.56 → 0.78 |
+| 对话级 agentic（8 场景，含指代消解） | 检索决策 **100%**，query 命中 **100%**，接地率 17%（无记忆）→ **83%**（有记忆），过度检索 0% |
+
+```bash
+PYTHONPATH=src python tests/eval_memory_recall.py     # 检索器对比
+PYTHONPATH=src DEEPSEEK_API_KEY=... python tests/eval_agentic_rag.py   # 对话级 agentic
 ```
 
 ---
 
 ## 安全边界 (Security Boundaries)
 
-### Guardrail — 12-Pattern Deterministic Blocker
-All checks are code-only, no LLM involved. Each pattern is testable with mock input. Defined in `src/research_agent/guardrail.py:9`.
-
-| Pattern | Blocks |
-|---------|--------|
-| `rm -rf /` / `~` / `$HOME` | Recursive root/home deletion |
-| `mkfs.` | Filesystem formatting |
-| `dd if=` | Raw disk write |
-| `> /dev/sd*` | Block device overwrite |
-| `chmod 777 /` | World-writable root |
-| `:(){` (fork bomb) | Denial-of-service |
-| `wget \| sh` / `curl \| bash` | Pipe-to-shell |
-| `eval` | Suspicious eval |
-| `sudo` | Privilege escalation |
-
-### HITL — Human-in-the-Loop Approval
-Blocked commands trigger a confirmation request. User has **60 seconds** to approve or reject. Unconfirmed commands are cancelled automatically.
-
-### Path Sandbox
-All file operations (`file_read`, `file_write`, `file_edit`, `file_glob`, `file_grep`) are scoped to the active workspace directory. Path traversal (`../`) is resolved via `os.path.normpath` and checked against the workspace root. Any path escaping the workspace is blocked before dispatch.
-
-### Parameter Validation
-Before dispatching any tool, `validate_tool_params` (`src/research_agent/tools/validate_params.py`) checks that all required parameters are present and correctly typed. Invalid calls are returned as errors with explanation — no silent failures.
-
-### Auto-Validation
-After every `file_write` or `file_edit` on `.py` or `.java` files, the agent automatically runs a syntax check:
-- `.py` → `py_compile.compile()` (+ `pytest` if test file)
-- `.java` → `javac` compile check
-
-Validation failures are injected as system messages so the LLM can self-correct in the next round.
-
-### API Key Protection
-- Never hardcoded in source code
-- Set via environment variables (CLI / Docker) or `config.yml`
-- `.env` excluded from git via `.gitignore`
-- CI credential scanner rejects commits containing key patterns
+- **Guardrail** — 12 类危险命令正则（`rm -rf /`、`sudo`、`mkfs`、`dd if=`、fork bomb、`curl|bash` …），纯代码、可单测。
+- **HITL** — 危险命令触发审批，60s 内未确认自动取消。
+- **Path sandbox** — 所有文件操作限定在工作区根，`../` 越权拦截。
+- **Parameter validation** — 分发前校验必需参数，静默失败为零。
+- **Auto-validation** — 文件写入后自动 `py_compile` / `pytest`，失败回灌模型自纠。
+- **API key** — 不硬编码、不入库、不写日志；CI 凭据扫描拦截。
 
 ---
 
 ## 已知限制 (Known Limitations)
 
-- **记忆向量层（可选）:** Tier B 个人记忆默认用关键词检索（始终可用）。如需语义检索，安装 `sentence-transformers` 并设 `RESEARCH_AGENT_MEMORY_VECTOR=1`；模型缺失时自动降级回关键词，不影响主功能。
-- **Max Rounds:** 单个请求最多 50 轮 agent 循环。可用 `RESEARCH_AGENT_MAX_ROUNDS` 环境变量配置。
-- **Shell Execution:** 使用 `shell=True`。风险由 12 模式 guardrail + HITL 审批流程缓解。
-- **Single-user:** 无鉴权层。假定本地或可信网络部署。
-- **ArXiv rate limits:** `search_papers` 调用公开 arXiv API；过度使用可能被限流。
-- **前端（重构中）:** V4 已移除 Web/Desktop 前端；交互以 CLI 为主，逐文件提案式（git diff + keep/undo）交互在规划中。
+- **Single-user**：无鉴权层，假定本地或可信网络部署。
+- **Shell execution**：`shell=True`，风险由 guardrail + HITL 缓解。
+- **Memory vector layer**：默认关键词检索；语义检索需 `.[vector]` + `RESEARCH_AGENT_MEMORY_VECTOR=1`，缺失时自动降级。
+- **评测规模**：记忆评测为自建小规模集，绝对指标偏乐观；以相对提升与方法论为准。
+- **前端**：V4 起移除 Web/Desktop，交互以 CLI 为主；逐文件提案式（git diff + keep/undo）在规划中。
 
 ---
 
 ## CI/CD
 
-### GitHub Actions (configured)
-- **Backend tests:** `pytest` on push/PR — all tests use mock LLM (deterministic, no API key needed)
-- **Docker image:** Build and push `pp-backend` to **GitHub Container Registry (GHCR)** on merge to master
-- **Credential scanner:** Blocks commits containing API key patterns
+- **Backend tests**：`pytest`（全 Mock LLM，确定性，无需 API key / 网络）。
+- **Docker image**：构建并推送 `pp-backend` 至 GHCR。
+- **Credential scanner**：拦截含 API key 模式的提交。
 
-### Render Auto-Deploy
-Connected via `render.yaml`. Automatically deploys the web service on push to the `master` branch. Set API keys (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `LLM_API_KEY`) as environment variables in the Render dashboard.
+版本历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ---
 

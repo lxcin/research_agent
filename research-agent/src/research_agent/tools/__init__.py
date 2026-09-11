@@ -73,11 +73,16 @@ class ToolRegistry:
     def install_plugin(self, plugin: ToolPlugin, apply_enabled: bool = True):
         """Install a plugin: dependency check, register tools (if enabled), record disk footprint."""
         if plugin.id in self._plugins:
-            # idempotent reinstall
+            # idempotent reinstall: refresh declaration but honor config enable state
+            if apply_enabled:
+                plugin.enabled = self.plugin_enabled(plugin.id, plugin.enabled)
             self._plugins[plugin.id] = plugin
             if plugin.enabled:
                 for t in plugin.tools:
                     self.register(t)
+            else:
+                for t in plugin.tools:
+                    self.unregister(t.name)
             if plugin.on_install:
                 try:
                     plugin.on_install()
