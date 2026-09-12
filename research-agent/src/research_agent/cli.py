@@ -60,7 +60,96 @@ def chat_cmd(model: str | None, api_key: str | None, api_base: str | None):
         from research_agent.agent import run_agent
         result = run_agent(user_input, llm, state)
         click.echo(result.final_response or "(no response)")
+        _handle_proposals(result)
         click.echo()
+
+
+def _render_proposals(changes) -> None:
+    for i, c in enumerate(changes, 1):
+        sign = {"added": "+", "deleted": "-", "modified": "~"}.get(c.status, "?")
+        click.echo(f"  [{i}] {sign} {c.path}  (+{c.additions} -{c.deletions})")
+
+
+def _handle_proposals(state) -> None:
+    """Render pending file changes and let the user keep/undo per file or all.
+
+    Commands: keep all | undo all | keep 1,3 | undo 2 | diff 2 | done
+    """
+    changes = list(getattr(state, "pending_proposals", []) or [])
+    if not changes:
+        return
+    workspace = getattr(state, "workspace_dir", "") or ""
+    from research_agent.proposal import ProposalManager
+    pmgr = ProposalManager(workspace)
+
+    click.echo()
+    click.echo(f"检测到 {len(changes)} 个文件改动（未提交）。keep=保留并提交，undo=撤销：")
+    _render_proposals(changes)
+    click.echo("  命令: keep all | undo all | keep 1,3 | undo 2 | diff 2 | done")
+
+    def _reset(state, remaining_paths):
+        props = pmgr.collect(remaining_paths) if remaining_paths else []
+        state.pending_proposals = props
+        return props
+
+    while True:
+        try:
+            cmd = click.prompt("proposal", prompt_suffix="> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            click.echo()
+            break
+        if cmd in ("done", "d", ""):
+            click.echo("已保留为未提交状态（可随时用 git 自行处理）。")
+            break
+
+        parts = cmd.replace(",", " ").split()
+        action = parts[0] if parts else ""
+        targets = parts[1:]
+
+        if action in ("keep", "k"):
+            if targets and targets[0] == "all":
+                pmgr.keep_all()
+                state.pending_proposals = []
+                click.echo("已保留全部改动。")
+                break
+            indexes = [int(x) for x in targets if x.isdigit()]
+            paths = [changes[i - 1].path for i in indexes if 1 <= i <= len(changes)]
+            if paths:
+                pmgr.keep(paths)
+                remaining = [c.path for c in changes if c.path not in paths]
+                changes = _reset(state, remaining)
+                click.echo(f"已保留 {len(paths)} 个文件。剩余 {len(changes)} 个。")
+                if not changes:
+                    break
+                _render_proposals(changes)
+            else:
+                click.echo("用法: keep 1,3 或 keep all")
+        elif action in ("undo", "u"):
+            if targets and targets[0] == "all":
+                pmgr.undo_all()
+                state.pending_proposals = []
+                click.echo("已撤销全部改动。")
+                break
+            indexes = [int(x) for x in targets if x.isdigit()]
+            paths = [changes[i - 1].path for i in indexes if 1 <= i <= len(changes)]
+            if paths:
+                pmgr.undo(paths)
+                remaining = [c.path for c in changes if c.path not in paths]
+                changes = _reset(state, remaining)
+                click.echo(f"已撤销 {len(paths)} 个文件。剩余 {len(changes)} 个。")
+                if not changes:
+                    break
+                _render_proposals(changes)
+            else:
+                click.echo("用法: undo 2 或 undo all")
+        elif action in ("diff",):
+            indexes = [int(x) for x in targets if x.isdigit()]
+            if indexes and 1 <= indexes[0] <= len(changes):
+                click.echo(changes[indexes[0] - 1].diff or "(no diff)")
+            else:
+                click.echo("用法: diff 1")
+        else:
+            click.echo("命令: keep all | undo all | keep 1,3 | undo 2 | diff 2 | done")
 
 
 @main.command()

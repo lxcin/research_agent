@@ -70,6 +70,7 @@ class AgentState:
     round_count: int = 0
     errors: list[str] = field(default_factory=list)
     sections: list[dict] = field(default_factory=list)
+    pending_proposals: list = field(default_factory=list)  # file changes awaiting keep/undo
     _pending_confirms: dict = field(default_factory=dict)
 
 

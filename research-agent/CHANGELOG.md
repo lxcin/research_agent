@@ -3,6 +3,25 @@
 All notable changes to PaperPilot. Versioning follows the iteration milestones
 (V1 → V4) rather than strict semver.
 
+## [4.1.0] — 2026-09
+
+**Git-based file-change proposals: review changes as a diff and keep/undo per
+file (opencode / Claude Code style).**
+
+### Added
+- `proposal.py` — `ProposalManager`: collect changed files as diff proposals
+  (status / +/- lines / unified diff), then `keep` (commit) or `undo`
+  (restore or delete) per file or all. Uses the workspace git repo.
+- CLI proposal review after each turn: `keep all | undo all | keep 1,3 |
+  undo 2 | diff N | done`; agent file changes are no longer auto-finalized.
+- `AgentState.pending_proposals` + `proposal` events on the event stream.
+- `tests/test_proposals.py` (8 tests) over real temp git repos.
+
+### Notes
+- If the workspace is not a git repo, no proposal is produced (changes are
+  written as before) — graceful fallback.
+- Dangerous shell still goes through HITL; proposals cover file writes/edits.
+
 ## [4.0.0] — 2026-09
 
 **Direction change: research tool → general-purpose personal assistant.

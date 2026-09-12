@@ -23,6 +23,7 @@ Tool plugins (tools/)          filesystem · shell · subagent · memory · diag
 - **纵深治理 (Deterministic governance)** — regex guardrail + path sandbox + HITL approval + post-write `py_compile/pytest` self-correction. All mock-testable, no API key/network.
 - **对话级 agentic RAG 记忆 (Conversation-level agentic RAG)** — small-model distillation into typed `MemoryUnit`s; the agent autonomously formulates retrieval queries from dialogue and calls the `search_memory` tool. Hybrid keyword + vector (RRF) recall.
 - **可观测性 (Observability)** — every agent event lands in a JSONL event stream; `RunMonitor` detects stalls/repeated-tool/error-streaks; `diagnose` CLI produces reports.
+- **提案式文件改动 (Git-based change proposals)** — agent file edits are staged in the workspace git repo (not auto-committed); after each turn they are shown as a diff and the user decides `keep` (commit) or `undo` (restore/delete), per file or all at once — opencode / Claude Code style.
 
 ---
 
@@ -91,6 +92,7 @@ research-agent/
 ├── src/research_agent/
 │   ├── agent.py            # Host shell（装配 + 回合后横切）
 │   ├── runtime.py          # 可替换内核：AgentRuntime / FunctionCallingRuntime
+│   ├── proposal.py         # git 提案：收集 diff + keep/undo
 │   ├── context.py          # 令牌感知的分层上下文构建
 │   ├── cli.py              # CLI: chat / diagnose / plugin
 │   ├── server.py           # FastAPI 纯 API（SSE 流式）
@@ -153,7 +155,7 @@ PYTHONPATH=src DEEPSEEK_API_KEY=... python tests/eval_agentic_rag.py   # 对话�
 - **Shell execution**：`shell=True`，风险由 guardrail + HITL 缓解。
 - **Memory vector layer**：默认关键词检索；语义检索需 `.[vector]` + `RESEARCH_AGENT_MEMORY_VECTOR=1`，缺失时自动降级。
 - **评测规模**：记忆评测为自建小规模集，绝对指标偏乐观；以相对提升与方法论为准。
-- **前端**：V4 起移除 Web/Desktop，交互以 CLI 为主；逐文件提案式（git diff + keep/undo）在规划中。
+- **提案式改动**：需要工作区是 git 仓库（`git_init` 在项目首次创建时自动执行）；非 git 目录下文件改动按原样直接写入。前端仍为 CLI，提案经 CLI 交互审阅。
 
 ---
 

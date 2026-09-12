@@ -263,20 +263,23 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
             except Exception:
                 pass
 
+    _changed_paths: set[str] = set()
+
+    def _on_event_inner(et: str, d: dict):
+        if _diag_on:
+            recorder.record(et, d)
+            monitor.observe(et, d)
+        if et == "file_change" and d.get("path"):
+            _changed_paths.add(d["path"])
+
     if on_event is not None:
         _orig_on_event = on_event
 
         def on_event(et: str, d: dict):
-            if _diag_on:
-                recorder.record(et, d)
-                monitor.observe(et, d)
+            _on_event_inner(et, d)
             _orig_on_event(et, d)
     else:
-        def _record_only(et: str, d: dict):
-            if _diag_on:
-                recorder.record(et, d)
-                monitor.observe(et, d)
-        on_event = _record_only
+        on_event = _on_event_inner
 
     from research_agent.tools import get_registry
     from research_agent.tools.builtin import register_builtins
@@ -378,6 +381,20 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
         stream_response=_stream_patchable,
     )
     FunctionCallingRuntime().run(ctx)
+    # ── Collect file changes as a keep/undo proposal (git-based) ──
+    try:
+        from research_agent.proposal import ProposalManager
+        pmgr = ProposalManager(workspace_dir)
+        if _changed_paths and pmgr.is_repo():
+            proposals = pmgr.collect(_changed_paths)
+            state.pending_proposals = proposals
+            for c in proposals:
+                _emit(on_event, "proposal", {
+                    "path": c.path, "status": c.status,
+                    "additions": c.additions, "deletions": c.deletions})
+    except Exception:
+        pass
+
     # ── Stream final response ──
     state = validate_response(state)
     _save_turn(state, workspace_dir, chat_id)
