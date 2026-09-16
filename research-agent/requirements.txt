@@ -5,6 +5,7 @@ uvicorn
 httpx
 jieba
 litellm
+numpy
 pydantic
 tiktoken
 pyyaml
