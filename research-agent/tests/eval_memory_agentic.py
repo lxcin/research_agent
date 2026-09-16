@@ -24,6 +24,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 from research_agent.memory import storage  # noqa: E402
 from research_agent.memory.models import MemoryUnit, MemoryKind, MemoryScope  # noqa: E402
+from research_agent.memory.rerank import mmr_select  # noqa: E402
 
 RRF_K = 60
 
@@ -232,9 +233,86 @@ def main():
         vecr = [ids[i] for i in np.argsort(-sims)[: k * 3]]
         return _rrf([kwr, vecr], k)
 
+    def vector_only(query, k):
+        if doc_emb is None:
+            return []
+        import numpy as np
+        sims = doc_emb @ emb.encode([query])[0]
+        return [ids[i] for i in np.argsort(-sims)[:k]]
+
+    def hybrid_weighted(query, k, w_kw=1.0, w_vec=1.0):
+        """Weighted RRF: w_kw/(K+rank_kw) + w_vec/(K+rank_vec)."""
+        import numpy as np
+        kwr = [u.id for u in storage.search_keyword(query, limit=k * 3)]
+        vecr = ([ids[i] for i in np.argsort(-(doc_emb @ emb.encode([query])[0]))[: k * 3]]
+                if doc_emb is not None else [])
+        scores = {}
+        for rank, uid in enumerate(kwr):
+            scores[uid] = scores.get(uid, 0.0) + w_kw / (RRF_K + rank + 1)
+        for rank, uid in enumerate(vecr):
+            scores[uid] = scores.get(uid, 0.0) + w_vec / (RRF_K + rank + 1)
+        return [u for u, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True)][:k]
+
+    ov = ovh = None
     if emb is not None:
+        ov, cv = _metrics(vector_only)
+        _fmt("L2a vector-only (bge cosine)", ov, cv)
         oh, ch = _metrics(hybrid)
-        _fmt("L2 hybrid (keyword + vector RRF)", oh, ch)
+        _fmt("L2b hybrid (keyword + vector RRF, equal)", oh, ch)
+
+        # ── core recall summary ──
+        print("\n" + "=" * 62)
+        print("CORE RECALL SUMMARY (48 units / 27 queries, hard negatives)")
+        print(f"{'method':<26}{'R@1':>7}{'R@3':>7}{'R@5':>7}{'Hit@1':>8}{'MRR':>7}")
+        for name, m in (("keyword-only", ok), ("vector-only", ov), ("hybrid (RRF)", oh)):
+            print(f"{name:<26}{m['R@1']:>7.1%}{m['R@3']:>7.1%}{m['R@5']:>7.1%}"
+                  f"{m['Hit@1']:>8.1%}{m['MRR']:>7.3f}")
+        print("\nby category (R@5):")
+        cats = sorted(cv.keys())
+        print(f"{'category':<12}{'keyword':>10}{'vector':>10}{'hybrid':>10}")
+        for c in cats:
+            print(f"{c:<12}{ck[c]['R@5']:>10.0%}{cv[c]['R@5']:>10.0%}{ch[c]['R@5']:>10.0%}")
+
+        # ── weighted-RRF sweep (vector weight fixed = 1.0) ──
+        print("\n" + "=" * 62)
+        print("WEIGHTED RRF SWEEP  (w_vec=1.0, varying w_kw)")
+        print(f"{'w_kw':>6}{'R@1':>8}{'R@3':>8}{'R@5':>8}{'Hit@1':>8}{'MRR':>8}")
+        best = None
+        for wk in (0.0, 0.15, 0.3, 0.5, 0.7, 1.0):
+            m, _ = _metrics(lambda q, k, wk=wk: hybrid_weighted(q, k, w_kw=wk, w_vec=1.0))
+            print(f"{wk:>6.2f}{m['R@1']:>8.1%}{m['R@3']:>8.1%}{m['R@5']:>8.1%}"
+                  f"{m['Hit@1']:>8.1%}{m['MRR']:>8.3f}")
+            if best is None or m["R@5"] > best[1]["R@5"]:
+                best = (wk, m)
+        print(f"\nbest w_kw={best[0]:.2f}  R@5={best[1]['R@5']:.1%}  MRR={best[1]['MRR']:.3f}"
+              f"   (vector-only R@5={ov['R@5']:.1%})")
+
+        # ── MMR diversity re-rank over vector candidates ──
+        def vector_mmr(query, k, lam=0.5, pool=20):
+            import numpy as np
+            qv = emb.encode([query])[0]
+            sims = doc_emb @ qv
+            order = list(np.argsort(-sims)[:pool])
+            cids = [ids[i] for i in order]
+            cvecs = doc_emb[order]
+            return mmr_select(qv, cvecs, cids, k, lam)
+
+        print("\n" + "=" * 62)
+        print("MMR RE-RANK SWEEP  (vector top-20 pool -> MMR top-5)")
+        print(f"{'lam':>6}{'R@1':>8}{'R@3':>8}{'R@5':>8}{'Hit@1':>8}{'MRR':>8}"
+              f"{'aggR@5':>9}")
+        best_mmr = None
+        for lam in (0.3, 0.5, 0.7, 0.85, 1.0):
+            m, cm = _metrics(lambda q, k, lam=lam: vector_mmr(q, k, lam=lam))
+            agg = cm.get("aggregate", {}).get("R@5", 0.0)
+            marker = "  (vector-only)" if lam == 1.0 else ""
+            print(f"{lam:>6.2f}{m['R@1']:>8.1%}{m['R@3']:>8.1%}{m['R@5']:>8.1%}"
+                  f"{m['Hit@1']:>8.1%}{m['MRR']:>8.3f}{agg:>9.0%}{marker}")
+            if best_mmr is None or m["R@5"] > best_mmr[1]["R@5"]:
+                best_mmr = (lam, m, agg)
+        print(f"\nbest MMR lam={best_mmr[0]:.2f}  R@5={best_mmr[1]['R@5']:.1%} "
+              f"aggR@5={best_mmr[2]:.0%}  vs vector-only R@5={ov['R@5']:.1%} "
+              f"aggR@5={cv.get('aggregate', {}).get('R@5', 0):.0%}")
     else:
         print("\n(L2 skipped: embedding model unavailable)")
 

@@ -8,7 +8,11 @@ whole Tier B subsystem can be disabled/uninstalled without touching core.
 from research_agent.memory.models import MemoryUnit, MemoryScope, MemoryKind
 from research_agent.memory import storage, vector
 
-RRF_K = 60
+# MMR relevance/diversity trade-off (0=pure diversity, 1=pure relevance).
+# 0.7 was best in tests/eval_memory_agentic.py (R@5 89.8%->91.6%, aggregate
+# R@5 45%->55%). Overridable for tuning/tests.
+import os as _os
+MMR_LAMBDA = float(_os.environ.get("RESEARCH_AGENT_MMR_LAMBDA", "0.7"))
 
 
 def reset_for_tests():
@@ -66,26 +70,49 @@ class MemoryManager:
 
     def retrieve(self, query: str, scope: MemoryScope | None = None,
                  kind: MemoryKind | None = None, limit: int = 5) -> list[MemoryUnit]:
-        keyword_hits = storage.search_keyword(query, scope=scope, kind=kind, limit=limit * 3)
-        vector_hits: list[dict] = vector.query(query, n_results=limit * 3) if vector.is_available() else []
+        """Retrieve ranked units.
 
-        if not vector_hits:
-            return keyword_hits[:limit]
+        Strategy is data-driven (see tests/eval_memory_*.py):
+          1) vector-first when embeddings are available, re-ranked by MMR
+             (λ=0.7) to avoid returning near-duplicate memories;
+          2) keyword search as fallback (or when vector layer is degraded).
+        Equal-weight keyword+vector RRF was measured to be WORSE than plain
+        vector here (keyword noise), so keyword is not fused in the vector path.
+        """
+        if vector.is_available():
+            try:
+                hits = vector.query_with_embeddings(query, n_results=max(limit * 4, 20))
+            except Exception:
+                hits = []
+            picked = self._mmr_pick(query, hits, scope, kind, limit)
+            if picked:
+                return picked
+        return storage.search_keyword(query, scope=scope, kind=kind, limit=limit)[:limit]
 
-        scores: dict[str, float] = {}
-        order: dict[str, MemoryUnit] = {}
-        for rank, u in enumerate(keyword_hits):
-            scores[u.id] = scores.get(u.id, 0.0) + 1.0 / (RRF_K + rank + 1)
-            order[u.id] = u
-        for rank, hit in enumerate(vector_hits):
-            uid = hit["id"]
-            scores[uid] = scores.get(uid, 0.0) + 1.0 / (RRF_K + rank + 1)
-            if uid not in order:
-                u = storage.get(uid)
-                if u:
-                    order[uid] = u
-        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-        return [order[uid] for uid, _ in ranked[:limit] if uid in order]
+    def _mmr_pick(self, query, hits, scope, kind, limit):
+        """Filter vector candidates by scope/kind, then MMR-select top-limit."""
+        from research_agent.memory.rerank import mmr_select
+        filt = []
+        for h in hits:
+            u = storage.get(h["id"])
+            if not u or not u.active:
+                continue
+            if scope is not None and u.scope != scope:
+                continue
+            if kind is not None and u.kind != kind:
+                continue
+            filt.append((h, u))
+        if not filt:
+            return []
+        qv = vector.encode_query(query)
+        have_emb = all(h.get("embedding") is not None for h, _ in filt)
+        if qv is not None and have_emb and len(filt) > 1:
+            embs = [h["embedding"] for h, _ in filt]
+            cids = [h["id"] for h, _ in filt]
+            order = {uid: u for uid, u in ((h["id"], u) for h, u in filt)}
+            selected = mmr_select(qv, embs, cids, limit, lam=MMR_LAMBDA)
+            return [order[i] for i in selected if i in order]
+        return [u for _, u in filt[:limit]]
 
 
 # Singleton

@@ -124,6 +124,42 @@ def _load_embedder():
     return _Emb()
 
 
+def _install_vector_retrieval(emb):
+    """Eval-only: make search_memory use keyword+vector(RRF) retrieval.
+
+    The product's MemoryManager.retrieve uses the chroma-backed vector layer
+    (may be unavailable in this env); this injects an equivalent local-embedding
+    retrieval so we can measure "with vector recall" behavior.
+    """
+    if emb is None:
+        return False
+    import numpy as np
+    import research_agent.memory.tier_b as tb
+    RRF_K = 60
+
+    def retrieve(self, query, scope=None, kind=None, limit=5):
+        kw = [u.id for u in storage.search_keyword(query, scope=scope, kind=kind,
+                                                   limit=limit * 3)]
+        units = storage.list_units(scope=scope, kind=kind, active_only=True, limit=500)
+        if not units:
+            return []
+        ids = [u.id for u in units]
+        texts = [u.text for u in units]
+        sims = emb.encode(texts) @ emb.encode([query])[0]
+        vec = [ids[i] for i in np.argsort(-sims)[: limit * 3]]
+        scores = {}
+        for rank, uid in enumerate(kw):
+            scores[uid] = scores.get(uid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        for rank, uid in enumerate(vec):
+            scores[uid] = scores.get(uid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        ranked = [u for u, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True)]
+        return [u for u in (storage.get(uid) for uid in ranked[:limit]) if u]
+
+    tb.MemoryManager.retrieve = retrieve
+    return True
+
+
+
 RRF_K = 60
 
 
@@ -205,6 +241,12 @@ def main():
     if not key:
         print("ERROR: need DEEPSEEK_API_KEY for the real-LLM agentic eval.")
         return
+    vec_mode = os.environ.get("EVAL_AGENT_VECTOR", "0") == "1"
+    if vec_mode:
+        ok = _install_vector_retrieval(emb)
+        print(f"[vector mode] search_memory -> keyword+vector(RRF): {'on' if ok else 'UNAVAILABLE'}")
+    else:
+        print("[keyword mode] search_memory -> keyword-only")
     print(f"Agentic-RAG eval: {len(SCENARIOS)} scenarios | "
           f"embedder={'on' if emb else 'off'}")
 

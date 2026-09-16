@@ -145,3 +145,41 @@ def query(text: str, n_results: int = 5) -> list[dict]:
          "distance": res["distances"][0][i] if res.get("distances") else 1.0}
         for i in range(len(res["ids"][0]))
     ]
+
+
+def encode_query(text: str):
+    """Embed a query with the cached model. Returns 1-D array or None."""
+    model = _load_model()
+    if model is None:
+        return None
+    try:
+        return model.encode([text], normalize_embeddings=True)[0]
+    except Exception:
+        return None
+
+
+def query_with_embeddings(text: str, n_results: int = 5) -> list[dict]:
+    """Vector search returning candidate embeddings (for MMR re-ranking).
+
+    Returns [{id, distance, embedding}]; [] when degraded/unavailable.
+    """
+    coll = _get_collection()
+    if coll is None:
+        return []
+    try:
+        res = coll.query(query_texts=[text], n_results=n_results,
+                         include=["embeddings", "distances"])
+    except Exception:
+        return []
+    if not res or not res["ids"] or not res["ids"][0]:
+        return []
+    embs = res.get("embeddings")
+    out = []
+    for i, uid in enumerate(res["ids"][0]):
+        emb = None
+        if embs is not None and len(embs) > 0 and i < len(embs[0]):
+            emb = embs[0][i]
+        out.append({"id": uid,
+                    "distance": res["distances"][0][i] if res.get("distances") else 1.0,
+                    "embedding": emb})
+    return out

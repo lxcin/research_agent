@@ -122,18 +122,21 @@ research-agent/
 
 写入（回合后异步）：对话 → 小模型蒸馏为 `MemoryUnit`（事实/偏好/决策/踩坑）→ 去重/冲突检测 → SQLite（+ 可选向量）。
 
-读取（Agent 自主）：LLM 判断是否需要记忆 → **从多轮对话中提炼自包含检索词** → 调用 `search_memory` 工具 → 混合召回（jieba 关键词 + `bge-small-zh` 向量 + RRF）→ 接地回答。与文件工作记忆物理隔离。
+读取（Agent 自主）：LLM 判断是否需要记忆 → **从多轮对话中提炼自包含检索词** → 调用 `search_memory` 工具 → **向量优先召回 + MMR 多样性重排**（关键词仅作无向量时后备）→ 接地回答。与文件工作记忆物理隔离。
+
+> 融合策略由评测驱动：实测等权 keyword+vector RRF 因关键词噪声反而劣于纯向量，故采用"向量优先 + MMR（λ=0.7）；关键词仅后备"。
 
 **可复现评测**（`tests/eval_*.py`）：
 
 | 评测 | 结果 |
 |------|------|
-| 检索器（48 单元 / 27 查询，含 hard-negative） | 混合召回 **Recall@5 62.8% → 81.7%**，MRR 0.56 → 0.78 |
-| 对话级 agentic（8 场景，含指代消解） | 检索决策 **100%**，query 命中 **100%**，接地率 17%（无记忆）→ **83%**（有记忆），过度检索 0% |
+| 检索器（48 单元 / 27 查询，含 hard-negative） | keyword R@5 62.8% → vector **89.8%** → vector+MMR **91.6%**；MRR 0.56→0.86；aggregate R@5 45%→55% |
+| 对话级 agentic（8 场景，含指代消解） | 检索决策 **100%**，query 命中 **100%**，接地率 17%（无记忆）→ **100%**（向量召回），过度检索 0% |
 
 ```bash
 PYTHONPATH=src python tests/eval_memory_recall.py     # 检索器对比
-PYTHONPATH=src DEEPSEEK_API_KEY=... python tests/eval_agentic_rag.py   # 对话级 agentic
+PYTHONPATH=src python tests/eval_memory_agentic.py    # 48单元/hard-negative：keyword/vector/hybrid + 权重/MMR 扫描
+PYTHONPATH=src DEEPSEEK_API_KEY=... python tests/eval_agentic_rag.py   # 对话级 agentic（EVAL_AGENT_VECTOR=1 走向量）
 ```
 
 ---

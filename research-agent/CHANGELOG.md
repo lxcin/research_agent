@@ -3,6 +3,30 @@
 All notable changes to PaperPilot. Versioning follows the iteration milestones
 (V1 → V4) rather than strict semver.
 
+## [4.2.0] — 2026-09
+
+**Memory retrieval: vector-first + MMR diversity re-ranking (data-driven).**
+
+### Added
+- `memory/rerank.py` — `mmr_select`: model-free MMR (λ relevance/diversity)
+  re-ranking over normalized embeddings; unit-testable without Chroma.
+- `memory/vector.py` — `encode_query`, `query_with_embeddings` (candidate
+  embeddings for re-ranking).
+- `tests/test_rerank.py` (8 tests); `tests/eval_memory_agentic.py` now reports
+  a keyword/vector/hybrid core table, a weighted-RRF sweep, and an MMR sweep.
+
+### Changed
+- `memory/tier_b.MemoryManager.retrieve` now uses **vector-first + MMR (λ=0.7)**
+  with keyword search only as fallback. Equal-weight keyword+vector RRF was
+  measured to be *worse* than plain vector here (keyword noise), so it was
+  dropped from the vector path. `MMR_LAMBDA` configurable
+  (`RESEARCH_AGENT_MMR_LAMBDA`).
+
+### Measured (48 units / 27 queries, hard negatives)
+- keyword-only R@5 62.8% → vector R@5 89.8% → **vector + MMR R@5 91.6%**;
+  aggregate-query R@5 45% → 55%; MRR 0.86.
+- Evidence recorded in `tests/eval_memory_agentic.py` (reproducible).
+
 ## [4.1.0] — 2026-09
 
 **Git-based file-change proposals: review changes as a diff and keep/undo per
