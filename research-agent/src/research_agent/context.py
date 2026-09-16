@@ -65,6 +65,9 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
         if is_enabled("memory"):
             messages.append({"role": "system", "content":
                 "关于用户本人的问题（偏好/说过的事/领域/历史决定），调用 search_memory 查询长期记忆后再回答；"
+                "若用户要求\"列出所有/有哪些/全部的某类信息\"（如所有偏好、踩过的坑、做过的决定），"
+                "这是集合查询：用 search_memory(kind=对应类型, limit=20) 做结构化枚举，不要只做语义 top-5；"
+                "kind 取值：fact/preference/decision/task/dead_end/insight/reference/style。"
                 "用户明确要求记住某信息时调用 memorize。不要凭空编造用户记忆。"})
     except Exception:
         pass

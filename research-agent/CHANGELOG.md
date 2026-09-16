@@ -3,6 +3,24 @@
 All notable changes to PaperPilot. Versioning follows the iteration milestones
 (V1 → V4) rather than strict semver.
 
+## [4.2.1] — 2026-09
+
+**Aggregate/set queries: agent enumerates by `kind` instead of semantic top-5.**
+
+### Changed
+- `context.py` memory hint now instructs the agent: for "列出所有/有哪些某类
+  信息" queries, call `search_memory(kind=<type>, limit=20)` (structured
+  enumeration) rather than a semantic top-5. `search_memory` already accepts
+  `kind`; this is a prompt/agentic-strategy change.
+
+### Measured
+- Root cause of low aggregate R@5 diagnosed: R@5 caps coverage when |gold|>5,
+  and semantic top-k cannot enumerate a whole category.
+- Conversation-level eval (`tests/eval_agentic_rag.py`, now with aggregate
+  scenarios): set-query **coverage 0% (no memory) → 100% (with memory)**; the
+  agent was observed calling `search_memory(kind="preference"/"dead_end",
+  limit=20)`.
+
 ## [4.2.0] — 2026-09
 
 **Memory retrieval: vector-first + MMR diversity re-ranking (data-driven).**

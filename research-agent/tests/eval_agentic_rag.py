@@ -98,6 +98,41 @@ SCENARIOS = [
         current="解释一下 Transformer 的自注意力机制是什么。",
         should_retrieve=False, tokens=[],
     ),
+    # aggregate / set queries (multi-gold): coverage measured per gold token
+    dict(
+        name="all_preferences",
+        agg=True,
+        gold=[
+            ("p1", "用户偏好用PyTorch做深度学习实验", MemoryKind.PREFERENCE, 0.8),
+            ("p2", "用户偏好把配置放在本地config.yml", MemoryKind.PREFERENCE, 0.7),
+            ("p3", "用户偏好用中文写邮件并签名", MemoryKind.PREFERENCE, 0.8),
+            ("p4", "用户偏好Markdown格式输出", MemoryKind.PREFERENCE, 0.6),
+            ("p5", "用户强调中文分词必须用jieba", MemoryKind.PREFERENCE, 0.7),
+            # decoys (other kinds) — must be filtered out
+            ("x1", "用户的导师姓王，在北京理工大学", MemoryKind.FACT, 0.7),
+            ("x2", "用户上周提交了一篇会议论文", MemoryKind.FACT, 0.5),
+        ],
+        history=[],
+        current="我都有哪些偏好？",
+        should_retrieve=True,
+        tokens=["PyTorch", "config.yml", "签名", "Markdown", "jieba"],
+    ),
+    dict(
+        name="all_pitfalls",
+        agg=True,
+        gold=[
+            ("d1", "用户曾放弃LangGraph因为异常堆栈难以定位", MemoryKind.DEAD_END, 0.7),
+            ("d2", "用户做过HPLC实验失败了色谱柱污染", MemoryKind.DEAD_END, 0.6),
+            ("d3", "用户因为onnx安装失败放弃了某个方案", MemoryKind.DEAD_END, 0.5),
+            ("d4", "用户把密钥明文写进config被扫描拦截", MemoryKind.DEAD_END, 0.7),
+            # decoy
+            ("x3", "用户的研究方向是RAG与检索增强生成", MemoryKind.FACT, 0.8),
+        ],
+        history=[],
+        current="我之前踩过哪些坑？",
+        should_retrieve=True,
+        tokens=["LangGraph", "HPLC", "onnx", "密钥"],
+    ),
 ]
 
 
@@ -227,12 +262,20 @@ def _run_one(scenario, memory_on, emb):
     calls = [d.get("input", {}).get("query", "")
              for et, d in events
              if et == "tool_start" and d.get("name") == "search_memory"]
+    kinds = [str(d.get("input", {}).get("kind", ""))
+             for et, d in events
+             if et == "tool_start" and d.get("name") == "search_memory"]
+    limits = [d.get("input", {}).get("limit")
+              for et, d in events
+              if et == "tool_start" and d.get("name") == "search_memory"]
     answer = result.final_response or ""
     gold_ids = [g[0] for g in scenario["gold"]]
     hit = bool(calls) and _query_hits_gold(calls[0], gold_ids, emb) if gold_ids else None
     grounded = any(tok.lower() in answer.lower() for tok in scenario["tokens"]) if scenario["tokens"] else None
-    return {"called": bool(calls), "queries": calls, "query_hit": hit,
-            "grounded": grounded, "answer": answer}
+    cov = (sum(1 for tok in scenario["tokens"] if tok.lower() in answer.lower())
+           / len(scenario["tokens"])) if scenario["tokens"] else None
+    return {"called": bool(calls), "queries": calls, "kinds": kinds, "limits": limits,
+            "query_hit": hit, "grounded": grounded, "coverage": cov, "answer": answer}
 
 
 def main():
@@ -251,34 +294,46 @@ def main():
           f"embedder={'on' if emb else 'off'}")
 
     rows = []
-    for sc in SCENARIOS:
+    only = os.environ.get("EVAL_ONLY", "")
+    scenarios = ([s for s in SCENARIOS if s["name"] in only.split(",")]
+                 if only else SCENARIOS)
+    for sc in scenarios:
         a = _run_one(sc, memory_on=False, emb=emb)
         b = _run_one(sc, memory_on=True, emb=emb)
         rows.append((sc, a, b))
-        tag = "RETRIEVE" if sc["should_retrieve"] else "NO-RETRIEVE"
+        tag = "AGGREGATE" if sc.get("agg") else ("RETRIEVE" if sc["should_retrieve"] else "NO-RETRIEVE")
         print(f"\n[{sc['name']}] ({tag})  Q: {sc['current']}")
-        print(f"  A(no mem) called={a['called']}  grounded={a['grounded']}")
+        print(f"  A(no mem) called={a['called']}  grounded={a['grounded']}  coverage={a['coverage']}")
         print(f"  B(withmem) called={b['called']} queries={b['queries'][:1]} "
-              f"hit={b['query_hit']} grounded={b['grounded']}")
+              f"kind={b['kinds'][:1]} limit={b['limits'][:1]} "
+              f"hit={b['query_hit']} grounded={b['grounded']} coverage={b['coverage']}")
         print(f"  A ans: {a['answer'][:90].replace(chr(10),' ')}")
-        print(f"  B ans: {b['answer'][:90].replace(chr(10),' ')}")
+        print(f"  B ans: {b['answer'][:100].replace(chr(10),' ')}")
 
     # aggregate
     ret = [r for r in rows if r[0]["should_retrieve"]]
+    single = [r for r in rows if r[0]["should_retrieve"] and not r[0].get("agg")]
+    aggs = [r for r in rows if r[0].get("agg")]
     noret = [r for r in rows if not r[0]["should_retrieve"]]
     def rate(xs):
         return (sum(1 for x in xs if x) / len(xs)) if xs else 0.0
+    def avg_cov(rs, which):
+        vals = [r[which]["coverage"] for r in rs if r[which]["coverage"] is not None]
+        return (sum(vals) / len(vals)) if vals else 0.0
 
     print("\n" + "=" * 60)
     print("AGGREGATE")
-    if ret:
-        print(f"  should-retrieve (n={len(ret)}):")
-        print(f"    decision  (B called search_memory): {rate([r[2]['called'] for r in ret]):.0%}")
-        print(f"    query_hit (B query -> gold top5)  : {rate([r[2]['query_hit'] for r in ret]):.0%}")
-        print(f"    grounding A (no mem)              : {rate([r[1]['grounded'] for r in ret]):.0%}")
-        print(f"    grounding B (with mem)            : {rate([r[2]['grounded'] for r in ret]):.0%}")
-        print(f"    grounding gain (B-A)              : "
-              f"{rate([r[2]['grounded'] for r in ret]) - rate([r[1]['grounded'] for r in ret]):+.0%}")
+    if single:
+        print(f"  single-fact should-retrieve (n={len(single)}):")
+        print(f"    decision  (B called search_memory): {rate([r[2]['called'] for r in single]):.0%}")
+        print(f"    query_hit (B query -> gold top5)  : {rate([r[2]['query_hit'] for r in single]):.0%}")
+        print(f"    grounding A (no mem)              : {rate([r[1]['grounded'] for r in single]):.0%}")
+        print(f"    grounding B (with mem)            : {rate([r[2]['grounded'] for r in single]):.0%}")
+    if aggs:
+        print(f"  set/aggregate queries (n={len(aggs)}):")
+        print(f"    decision (B)          : {rate([r[2]['called'] for r in aggs]):.0%}")
+        print(f"    coverage A (no mem)   : {avg_cov(aggs, 1):.0%}")
+        print(f"    coverage B (with mem) : {avg_cov(aggs, 2):.0%}")
     if noret:
         print(f"  should-NOT-retrieve (n={len(noret)}):")
         print(f"    over-retrieval (A) : {rate([r[1]['called'] for r in noret]):.0%}")

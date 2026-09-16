@@ -131,7 +131,7 @@ research-agent/
 | 评测 | 结果 |
 |------|------|
 | 检索器（48 单元 / 27 查询，含 hard-negative） | keyword R@5 62.8% → vector **89.8%** → vector+MMR **91.6%**；MRR 0.56→0.86；aggregate R@5 45%→55% |
-| 对话级 agentic（8 场景，含指代消解） | 检索决策 **100%**，query 命中 **100%**，接地率 17%（无记忆）→ **100%**（向量召回），过度检索 0% |
+| 对话级 agentic（10 场景，含指代消解 / 聚合查询） | 检索决策 **100%**，query 命中 **100%**，接地率 17%（无记忆）→ **100%**（向量召回）；聚合查询覆盖 0%→**100%**（用 `kind` 枚举）；过度检索 0% |
 
 ```bash
 PYTHONPATH=src python tests/eval_memory_recall.py     # 检索器对比
