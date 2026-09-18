@@ -129,3 +129,44 @@ agent 干活 → 改动以文件级 diff 呈现：
 - [x] 对话与当前工作目录绑定
 - [x] 不做工作区/项目进度总结功能（删 progress 机制）
 - [x] 交互 = opencode/Claude Code 逐文件提案：同意全部，或先拒绝部分文件再同意剩余
+
+---
+
+## 8. 执行隔离与工作区回滚（硬化）
+
+命令执行的威胁模型分两层，必须分开解决：
+
+- **能碰哪里**（隔离）：`sandbox.py` 把 `shell_exec` 放进一次性容器。
+- **改了能不能退**（回滚）：`checkpoint.py` 在执行前对工作区做 git 快照。
+
+### 8.1 沙箱后端（`shell.backend`）
+
+| 取值 | 行为 |
+|------|------|
+| `auto`（默认） | 有 docker 用 docker，否则降级 local 并告警 |
+| `local` | 始终本机执行（无隔离，仅 guardrail + HITL） |
+| `docker` | 始终容器；docker 不可用则**直接失败**，不静默降级 |
+
+`docker` 容器参数：只挂载工作区到 `/work`、`--network none`（默认断网）、
+`--memory/--cpus/--pids-limit` 资源上限、`--read-only` rootfs + `--tmpfs /tmp`、
+`no-new-privileges`、`--rm`。后台任务同样走同一后端。
+
+> 注意：工作区是 **bind mount**，所以容器保护的是**工作区之外**的本机；
+> 工作区内的写入仍直接落宿主 —— 这正是需要 checkpoint 的原因。
+
+### 8.2 工作区检查点（`shell.checkpoint`，默认开）
+
+执行 `shell_exec` 前，用临时索引（`GIT_INDEX_FILE`）把整个工作树
+（含未跟踪、未忽略的文件）写成一个 commit 对象，存到
+`refs/research-agent/checkpoints/*`，**不改动工作树与真实索引**。
+污染后 `restore_checkpoint()` = `checkout <sha> -- .` + `clean -fd` + `reset`，
+即可回到执行前状态（保留执行前未提交的 agent 编辑）。
+
+**已知边界**（诚实口径）：
+- 仅支持 git 工作区；非 repo 不做快照，无回滚。
+- git-ignored 文件不进快照（`git add -A` 遵守 .gitignore），其覆盖不可恢复。
+- `restore_checkpoint()` 会 `clean -fd` 删除未跟踪文件，属于显式用户动作，不自动触发。
+- 单文件级已由 `proposal.py`（keep/undo）覆盖；checkpoint 针对"整条命令的副作用"。
+
+验证：`tests/test_sandbox.py`（9）与 `tests/test_checkpoint.py`（4）确定性覆盖。
+

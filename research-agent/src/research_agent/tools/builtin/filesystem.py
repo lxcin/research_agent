@@ -1,12 +1,12 @@
 """Filesystem tools: shell_exec, file_read, file_write, file_glob, file_grep.
 All operations scoped to project working directory for safety."""
 
-import subprocess
 import os
 import glob as glob_mod
 import re
 
 from research_agent.tools.schema import ToolSchema, ToolResult
+from research_agent.sandbox import run_command, resolve_backend, get_sandbox_config
 
 
 def _get_project_dir(state) -> str:
@@ -30,6 +30,27 @@ def _safe_path(project_dir: str, user_path: str) -> str | None:
 
 # ── Shell Exec ──
 
+def _maybe_checkpoint(state, workdir: str) -> str:
+    """Snapshot the workspace before a shell command so its writes can be rolled
+    back (git-based; see research_agent.checkpoint). Best-effort, never raises."""
+    try:
+        from research_agent import checkpoint as _ckpt
+        if not _ckpt.checkpoint_enabled() or not _ckpt.is_repo(workdir):
+            return ""
+        r = _ckpt.create_checkpoint(workdir, label="shell_exec")
+        if not r.get("success"):
+            return ""
+        ref = r.get("ref", "")
+        if ref:
+            try:
+                state._last_checkpoint = ref
+            except Exception:
+                pass
+        return ref
+    except Exception:
+        return ""
+
+
 def _handle_shell_exec(params: dict, llm, state, emit) -> ToolResult:
     command = params.get("command", "")
     timeout = int(params.get("timeout", 0)) or 300  # default 5min
@@ -40,6 +61,8 @@ def _handle_shell_exec(params: dict, llm, state, emit) -> ToolResult:
     workdir = _get_project_dir(state)
     if "sudo" in command:
         return ToolResult.fail("Dangerous command blocked")
+
+    cp_ref = _maybe_checkpoint(state, workdir)
 
     if background:
         # Background task: run in thread, write output to file
@@ -53,21 +76,22 @@ def _handle_shell_exec(params: dict, llm, state, emit) -> ToolResult:
         # Write task metadata
         import json as _json
         meta = {"id": task_id, "command": command, "started": datetime.datetime.now().isoformat(),
-                "status": "running", "cwd": workdir}
+                "status": "running", "cwd": workdir,
+                "backend": resolve_backend(get_sandbox_config())[0],
+                "checkpoint": cp_ref}
         with open(meta_path, "w") as f: _json.dump(meta, f)
 
         def _run_background():
-            import subprocess as _sp
             try:
-                r = _sp.run(command, shell=True, capture_output=True, text=True,
-                           timeout=timeout, cwd=workdir)
-                meta["status"] = "done" if r.returncode == 0 else "failed"
-                meta["returncode"] = r.returncode
-                output = f"STDOUT:\n{r.stdout[:4000]}\n\nSTDERR:\n{r.stderr[:2000]}"
+                r = run_command(command, workdir, timeout)
+                meta["status"] = ("done" if r.get("success")
+                                 else "timeout" if r.get("error") == "timeout"
+                                 else "failed")
+                meta["returncode"] = r.get("returncode")
+                meta["backend"] = r.get("backend")
+                output = (f"STDOUT:\n{(r.get('stdout') or '')[:4000]}\n\n"
+                          f"STDERR:\n{(r.get('stderr') or '')[:2000]}")
                 with open(log_path, "w") as f: f.write(output)
-            except _sp.TimeoutExpired:
-                meta["status"] = "timeout"
-                with open(log_path, "w") as f: f.write("Task timed out")
             except Exception as e:
                 meta["status"] = "error"
                 with open(log_path, "w") as f: f.write(str(e))
@@ -82,29 +106,30 @@ def _handle_shell_exec(params: dict, llm, state, emit) -> ToolResult:
                             hint=f"Check with check_tasks(task_id={task_id}) or read {log_path}")
 
     emit("tool", {"tool": "shell_exec", "status": "start", "command": command[:80]})
-    try:
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
-            timeout=min(timeout, 300), cwd=workdir,
-        )
-        stdout = result.stdout[:4000]
-        stderr = result.stderr[:2000]
-        success = result.returncode == 0
-
-        emit("tool", {"tool": "shell_exec", "status": "done" if success else "error"})
-        return ToolResult.ok(
-            success=success,
-            stdout=stdout,
-            stderr=stderr,
-            returncode=result.returncode,
-            cwd=workdir,
-            hint="stderr/error above shows what went wrong, use file_edit to fix" if not success else "",
-        )
-    except subprocess.TimeoutExpired:
+    limit = min(timeout, 300)
+    res = run_command(command, workdir, limit)
+    backend = res.get("backend", "local")
+    if res.get("error") == "timeout":
         emit("tool", {"tool": "shell_exec", "status": "error", "error": "timeout"})
-        return ToolResult.fail("Command timed out (30s limit)")
-    except Exception as e:
-        return ToolResult.fail(str(e))
+        return ToolResult.fail(f"Command timed out ({limit}s limit)")
+    stdout = (res.get("stdout") or "")[:4000]
+    stderr = (res.get("stderr") or "")[:2000]
+    success = bool(res.get("success"))
+    if res.get("warning"):
+        stderr = f"[sandbox] {res['warning']}\n{stderr}"
+
+    emit("tool", {"tool": "shell_exec", "status": "done" if success else "error",
+                  "backend": backend})
+    return ToolResult.ok(
+        success=success,
+        stdout=stdout,
+        stderr=stderr,
+        returncode=res.get("returncode"),
+        cwd=workdir,
+        backend=backend,
+        checkpoint=cp_ref,
+        hint="stderr/error above shows what went wrong, use file_edit to fix" if not success else "",
+    )
 
 
 # ── File Tools ──

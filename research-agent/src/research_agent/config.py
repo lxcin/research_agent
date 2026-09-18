@@ -48,6 +48,15 @@ memory:
   max_inject_tokens: 1500  # read path context budget (Phase C)
   # vector: set env RESEARCH_AGENT_MEMORY_VECTOR=1 to enable embedding layer
 
+shell:
+  backend: auto            # auto / local / docker  (docker = isolated sandbox)
+  image: python:3.11-slim  # container image used when backend resolves to docker
+  network: false           # false = no network access inside the sandbox
+  memory: 512m             # container memory cap
+  cpus: "1.0"              # container CPU cap
+  pids_limit: 256          # container process cap (fork-bomb guard)
+  checkpoint: true         # snapshot workspace (git) before shell_exec for rollback
+
 projects:
   data_dir: ~/research-agent-data
 """, encoding="utf-8")

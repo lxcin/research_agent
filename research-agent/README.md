@@ -24,6 +24,7 @@ Tool plugins (tools/)          filesystem · shell · subagent · memory · diag
 - **对话级 agentic RAG 记忆 (Conversation-level agentic RAG)** — small-model distillation into typed `MemoryUnit`s; the agent autonomously formulates retrieval queries from dialogue and calls the `search_memory` tool. Hybrid keyword + vector (RRF) recall.
 - **可观测性 (Observability)** — every agent event lands in a JSONL event stream; `RunMonitor` detects stalls/repeated-tool/error-streaks; `diagnose` CLI produces reports.
 - **提案式文件改动 (Git-based change proposals)** — agent file edits are staged in the workspace git repo (not auto-committed); after each turn they are shown as a diff and the user decides `keep` (commit) or `undo` (restore/delete), per file or all at once — opencode / Claude Code style.
+- **沙箱化命令执行 + 工作区回滚 (Sandboxed shell + rollback)** — `shell_exec` can run in a one-shot Docker container (network off, workspace-only mount, CPU/mem/pid caps) so the host outside the workspace is protected; before each command the workspace is snapshotted (git), so its writes can be rolled back.
 
 ---
 
@@ -93,6 +94,8 @@ research-agent/
 │   ├── agent.py            # Host shell（装配 + 回合后横切）
 │   ├── runtime.py          # 可替换内核：AgentRuntime / FunctionCallingRuntime
 │   ├── proposal.py         # git 提案：收集 diff + keep/undo
+│   ├── checkpoint.py       # 工作区 git 快照 + 回滚（shell 执行前）
+│   ├── sandbox.py          # shell_exec 隔离后端（local / docker）
 │   ├── context.py          # 令牌感知的分层上下文构建
 │   ├── cli.py              # CLI: chat / diagnose / plugin
 │   ├── server.py           # FastAPI 纯 API（SSE 流式）
@@ -146,6 +149,8 @@ PYTHONPATH=src DEEPSEEK_API_KEY=... python tests/eval_agentic_rag.py   # 对话�
 - **Guardrail** — 12 类危险命令正则（`rm -rf /`、`sudo`、`mkfs`、`dd if=`、fork bomb、`curl|bash` …），纯代码、可单测。
 - **HITL** — 危险命令触发审批，60s 内未确认自动取消。
 - **Path sandbox** — 所有文件操作限定在工作区根，`../` 越权拦截。
+- **Container sandbox（可选）** — `shell.backend: auto|local|docker`。`docker` 下命令在一次性容器中运行：`--network none`、仅挂载工作区到 `/work`、`--memory/--cpus/--pids-limit` 限额、`--read-only` rootfs。`docker` 不可用时显式失败，绝不静默降级到无隔离路径。
+- **Workspace rollback** — `shell_exec` 执行前用 git 将整个工作树（含未跟踪文件）快照到 `refs/research-agent/checkpoints/*`，污染后可 `restore_checkpoint` 回滚到执行前状态。
 - **Parameter validation** — 分发前校验必需参数，静默失败为零。
 - **Auto-validation** — 文件写入后自动 `py_compile` / `pytest`，失败回灌模型自纠。
 - **API key** — 不硬编码、不入库、不写日志；CI 凭据扫描拦截。
@@ -155,7 +160,8 @@ PYTHONPATH=src DEEPSEEK_API_KEY=... python tests/eval_agentic_rag.py   # 对话�
 ## 已知限制 (Known Limitations)
 
 - **Single-user**：无鉴权层，假定本地或可信网络部署。
-- **Shell execution**：`shell=True`，风险由 guardrail + HITL 缓解。
+- **Shell execution**：默认 `backend=auto`；无 docker 时降级为本机 `shell=True`，风险由 guardrail + HITL 缓解。工作区以 bind mount 进容器，故容器只保护工作区**之外**的本机，工作区内写入依赖 checkpoint 回滚。
+- **Rollback 边界**：checkpoint 仅支持 git 工作区；git-ignored 文件不进快照、其覆盖不可恢复；`restore_checkpoint` 会删除未跟踪文件，须显式触发。
 - **Memory vector layer**：默认关键词检索；语义检索需 `.[vector]` + `RESEARCH_AGENT_MEMORY_VECTOR=1`，缺失时自动降级。
 - **评测规模**：记忆评测为自建小规模集，绝对指标偏乐观；以相对提升与方法论为准。
 - **提案式改动**：需要工作区是 git 仓库（`git_init` 在项目首次创建时自动执行）；非 git 目录下文件改动按原样直接写入。前端仍为 CLI，提案经 CLI 交互审阅。
