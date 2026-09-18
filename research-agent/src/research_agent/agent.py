@@ -468,14 +468,28 @@ def _turns_token_count(turns) -> int:
 
 
 def _compress_budget() -> int:
-    """Uncompressed-history token budget before compression kicks in."""
+    """Uncompressed-history token budget before compression kicks in.
+
+    Derived from the model's context window (context.compress_ratio, default
+    0.6) instead of a flat 12000, so compression only fires when history actually
+    approaches the window. RESEARCH_AGENT_COMPRESS_TOKENS overrides everything.
+    """
     env = os.environ.get("RESEARCH_AGENT_COMPRESS_TOKENS", "")
     if env:
         try:
             return int(env)
         except ValueError:
             pass
-    return 12000
+    try:
+        from research_agent.config import (
+            get_context_config, get_max_context_tokens, get_model_name)
+        ratio = get_context_config().get("compress_ratio", 0.6)
+        window = get_max_context_tokens(get_model_name())
+    except Exception:
+        ratio, window = 0.6, 0
+    if not window:
+        return 10 ** 9  # unknown window → never auto-compress on size
+    return max(2000, int(window * ratio))
 
 
 def _maybe_compress(workspace_dir: str, chat_id: str, llm: LLMProvider):
@@ -486,6 +500,12 @@ def _maybe_compress(workspace_dir: str, chat_id: str, llm: LLMProvider):
     kept verbatim; older turns are summarized into conclusions/dead_ends and
     appended to progress.md.
     """
+    try:
+        from research_agent.config import get_context_config
+        if not get_context_config().get("compress_enabled", True):
+            return
+    except Exception:
+        pass
     uncompressed = count_uncompressed_turns(workspace_dir, chat_id)
     if uncompressed <= 6:
         return

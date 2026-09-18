@@ -170,3 +170,32 @@ agent 干活 → 改动以文件级 diff 呈现：
 
 验证：`tests/test_sandbox.py`（9）与 `tests/test_checkpoint.py`（4）确定性覆盖。
 
+---
+
+## 9. 对话历史压缩 与 "按需召回" 复用分析
+
+### 9.1 压缩触发（最小改动）
+
+- 预算不再写死 12000，改为 **按模型上下文窗口比例**：`context.compress_ratio`（默认 0.6），
+  即 `budget = max(2000, window * ratio)`；窗口未知时视为不自动压缩。
+- 新增开关 `context.compress_enabled`（默认 true）。
+- `RESEARCH_AGENT_COMPRESS_TOKENS` 仍为最高优先级（供测试与手动覆盖）。
+- 保留原策略：近 5 轮逐字 + 更早折叠为 `conclusions`/`dead_ends`。
+
+### 9.2 旧历史"按需召回"能否直接复用 Tier B？
+
+**结论：不能直接复用 Tier B 的 `MemoryManager`/`MemoryUnit` 存储，但应复用其底层 `vector` + `mmr_select`。**
+
+不复用 Tier B 存储的理由：
+- **语义冲突**：`MemoryUnit` 是"关于用户的持久事实"（scope=user、跨项目）；turn 是"本 chat 说过的话"。
+- **污染个人记忆**：把原始对话灌进 Tier B 会让 `search_memory` 与聚合查询（`kind` 枚举 / `limit=20`）被 turn 淹没。
+- **生命周期不同**：turn 可压缩、chat 局部；`MemoryUnit` 有 supersede 链、跨会话。
+
+应复用的组件：
+- `memory/vector.py`（`encode_query` / `query_with_embeddings`，使用**独立 Chroma collection**）
+- `memory/rerank.py` 的 `mmr_select`
+
+做法：新建**独立的会话索引**（单独 collection + `chat_id`/`round` 元数据）与
+`recall_history(query, chat_id)`，与 Tier B 命名空间隔离、可独立开关。
+
+

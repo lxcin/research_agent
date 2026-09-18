@@ -42,6 +42,8 @@ embedding:
 context:
   max_tokens: 4000
   compress_threshold: 10
+  compress_enabled: true   # rolling summarization of old turns
+  compress_ratio: 0.6      # trigger when history >= ratio * model context window
 
 memory:
   enabled: true            # Tier B personal memory write/read
@@ -68,6 +70,26 @@ def get_memory_config() -> dict:
     return {
         "enabled": bool(mem.get("enabled", True)),
         "max_inject_tokens": int(mem.get("max_inject_tokens", 1500)),
+    }
+
+
+def get_context_config() -> dict:
+    """Context/history management settings (compression trigger, ratio, ...)."""
+    config = load_config()
+    ctx = config.get("context", {})
+    try:
+        ratio = float(ctx.get("compress_ratio", 0.6))
+    except (TypeError, ValueError):
+        ratio = 0.6
+    try:
+        max_tokens = int(ctx.get("max_tokens", 4000))
+    except (TypeError, ValueError):
+        max_tokens = 4000
+    return {
+        "max_tokens": max_tokens,
+        "compress_threshold": int(ctx.get("compress_threshold", 10)),
+        "compress_enabled": bool(ctx.get("compress_enabled", True)),
+        "compress_ratio": ratio,
     }
 
 
