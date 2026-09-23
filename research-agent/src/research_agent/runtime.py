@@ -60,6 +60,23 @@ def _emit(event: EventCallback | None, event_type: str, data: dict):
         event(event_type, data)
 
 
+def _history_budget() -> int:
+    """Mid-turn cap on non-system message tokens (config context.max_history_tokens)."""
+    try:
+        from research_agent.config import get_context_config
+        return int(get_context_config().get("max_history_tokens", 24000))
+    except Exception:
+        return 24000
+
+
+def _wall_budget() -> float:
+    """Optional wall-clock cap per run (seconds); 0 = unlimited."""
+    try:
+        return float(os.environ.get("RESEARCH_AGENT_MAX_WALL_S", "0") or 0)
+    except ValueError:
+        return 0.0
+
+
 def _default_call_llm(ctx: RuntimeContext, messages, tools):
     fn = ctx.call_llm_with_tools or _call_llm_with_tools
     return fn(ctx.llm, messages, tools, "auto")
@@ -173,7 +190,7 @@ class FunctionCallingRuntime(AgentRuntime):
         llm = ctx.llm
         registry = ctx.registry
 
-        from research_agent.context import build_context
+        from research_agent.context import build_context, trim_history
         messages = build_context(state, registry, getattr(llm, "model", ""))
         capabilities = registry.generate_capabilities() if registry else ""
         if capabilities:
@@ -181,9 +198,18 @@ class FunctionCallingRuntime(AgentRuntime):
 
         tools_list = registry.list_for_llm() if registry else []
         total_retries = 0
+        run_started = time.time()
 
         for round_num in range(1, ctx.max_rounds + 1):
             state.round_count = round_num
+            # Cost controls (mid-turn): trim old context to a token budget and
+            # enforce a wall-clock cap, so a long run can't balloon unchecked.
+            messages = trim_history(messages, _history_budget())
+            wall = _wall_budget()
+            if wall and time.time() - run_started > wall:
+                _emit(emit, "thinking", {"text": f"达到运行时长上限 {wall:g}s，收口作答"})
+                state.final_response = _default_stream(ctx, _generate_msgs(messages, state))
+                break
             if total_retries >= MAX_TOTAL_RETRIES:
                 _emit(emit, "thinking", {"text": "重试次数已达上限"})
                 state.final_response = _default_stream(ctx, _generate_msgs(messages, state))

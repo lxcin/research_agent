@@ -284,5 +284,175 @@ def plugin_uninstall(plugin_id: str, yes: bool):
         click.echo(f"  - {d}")
 
 
+@main.command("quality")
+@click.option("--tests", default="tests/", help="测试路径 (default tests/)")
+@click.option("--no-report", is_flag=True, default=False, help="不写 JSON/HTML 产物")
+@click.option("--open", "open_report", is_flag=True, default=False, help="生成后用浏览器打开看板")
+@click.option("--no-fail", is_flag=True, default=False, help="门禁失败也返回 0")
+def quality_cmd(tests: str, no_report: bool, open_report: bool, no_fail: bool):
+    """内部质量门禁：测试 / 覆盖率 / 安全 一次性评估并生成看板."""
+    from research_agent.quality import gate
+    report = gate.run(workdir=".", tests_path=tests)
+
+    click.echo(f"质量门禁: {report['overall'].upper()}  "
+               f"({report['summary']['passed']}/{report['summary']['total']} checks)")
+    for c in report["checks"]:
+        mark = "PASS" if c["passed"] else "FAIL"
+        val = "n/a" if c["value"] is None else f"{c['value']}{c.get('unit', '')}"
+        click.echo(f"  [{mark}] {c['label']}: {val}  {c['detail']}")
+
+    if not no_report:
+        from research_agent.quality.report import write_report
+        paths = write_report(report)
+        click.echo(f"  看板: {paths['html_path']}")
+        if open_report:
+            import webbrowser
+            webbrowser.open("file:///" + paths["html_path"].replace("\\", "/"))
+
+    if report["overall"] != "pass" and not no_fail:
+        raise SystemExit(1)
+
+
+@main.command("web-doctor")
+def web_doctor_cmd():
+    """联网搜索后端体检（借鉴 agent-reach doctor）：按路由顺序报告可用性."""
+    from research_agent.tools.builtin import network
+    rows = network.web_doctor()
+    if not rows:
+        click.echo("未配置搜索后端。设置 web.search_providers，如 [duckduckgo] 或 [exa, tavily, duckduckgo]。")
+        return
+    for r in rows:
+        mark = "OK " if r["ready"] else "NG "
+        click.echo(f"  [{mark}] {r['provider']:<11} {r['detail']}")
+
+
+@main.command("audit")
+@click.option("--limit", default=20, help="最近扫描的会话数 (default 20)")
+@click.option("--report", "write", is_flag=True, default=False,
+              help="生成 audit-{ts}.md/.json 到 data_dir/audit/")
+def audit_cmd(limit: int, write: bool):
+    """全链路审查评分报告：追踪 → 审查 → 评分（评的是框架有效性）."""
+    from research_agent.diagnostics import audit as audit_mod
+    result = audit_mod.audit(limit=limit)
+    t = result["totals"]
+    click.echo(f"框架总分: {t['overall']}/100 ({t['grade']})  "
+               f"会话 {t['sessions']} | 工具 {t['tool_calls']}/失败 {t['tool_errors']} | "
+               f"故障 {t['faults']} | 完成 {t['completed']}")
+    for d, v in t["dimensions"].items():
+        click.echo(f"  {d}: {v}")
+    for k, c in sorted(result["issues"].items(), key=lambda kv: -kv[1]):
+        click.echo(f"  ⚠ {k}: {c}")
+    if write:
+        out = audit_mod.write_report(result)
+        click.echo(f"报告: {out['md_path']}")
+
+
+@main.group()
+def evolve():
+    """自进化：项目经验报告 / 用户技能 / 全链路记录查询."""
+
+
+@evolve.command("list")
+@click.option("--target", default="", help="过滤 target: skill/install_mcp/memory/...")
+@click.option("--status", default="", help="过滤 status: applied/rejected")
+@click.option("--text", default="", help="文本过滤")
+def evolve_list(target: str, status: str, text: str):
+    """查询自进化记录（全链路审计）。"""
+    from research_agent import evolve as ev
+    recs = ev.query_records(target or None, status or None, text)
+    if not recs:
+        click.echo("（无记录）")
+        return
+    for r in recs:
+        click.echo(f"  [{r.get('status')}] {r.get('target')} "
+                   f"{r.get('artifact') or ''} entry={r.get('entry_id')} {r.get('ts')}")
+
+
+@evolve.command("report")
+@click.option("--out", default="", help="输出目录（默认 data_dir/evolution）")
+def evolve_report(out: str):
+    """生成自进化报告（md/json）并打印。"""
+    from research_agent import evolve as ev
+    res = ev.write_report(out or None)
+    click.echo(res["markdown"])
+    click.echo(f"\n报告已写入: {res['md_path']}")
+
+
+@evolve.command("skills")
+def evolve_skills():
+    """列出用户技能及其开关状态（data_dir/skills）。"""
+    from research_agent import evolve as ev
+    skills = ev.list_skills()
+    if not skills:
+        click.echo("（无用户技能）")
+        return
+    for s in skills:
+        state = "on " if s["enabled"] else "off"
+        click.echo(f"  [{state}] {s['file']} (v{s['version']}, used {s['used']})")
+
+
+@evolve.command("enable")
+@click.argument("name")
+def evolve_enable(name: str):
+    """启用某个用户技能（写在文件 YAML 的 enabled 字段）。"""
+    from research_agent import evolve as ev
+    try:
+        ev.set_skill_enabled(name, True)
+    except FileNotFoundError:
+        click.echo(f"未找到技能: {name}", err=True)
+        raise SystemExit(1)
+    click.echo(f"已启用技能: {name}")
+
+
+@evolve.command("disable")
+@click.argument("name")
+def evolve_disable(name: str):
+    """禁用某个用户技能（不再按其 trigger 注入）。"""
+    from research_agent import evolve as ev
+    try:
+        ev.set_skill_enabled(name, False)
+    except FileNotFoundError:
+        click.echo(f"未找到技能: {name}", err=True)
+        raise SystemExit(1)
+    click.echo(f"已禁用技能: {name}")
+
+
+@evolve.command("usage")
+def evolve_usage():
+    """用户技能使用统计 + 效用 A/B（开/关该技能的 telemetry 对比）。"""
+    from research_agent import evolve as ev
+    usage = ev.skill_usage()
+    click.echo("技能使用次数:")
+    if not usage:
+        click.echo("  （无）")
+    for name, n in sorted(usage.items(), key=lambda kv: -kv[1]):
+        click.echo(f"  {name}: {n}")
+    rep = ev.utility_report()
+    click.echo(f"\n效用（运行 {rep['runs']} 次，使用事件 {rep['usage_events']}）:")
+    for s in rep["skills"]:
+        u, b = s["used"], s["baseline"]
+        click.echo(f"  [{s['skill']}] uses={s['uses']} | "
+                   f"tokens {u['tokens']} vs 基线 {b['tokens']} | "
+                   f"cost ${u['cost_usd']} vs ${b['cost_usd']} | "
+                   f"wall {u['wall_ms']} vs {b['wall_ms']} ms | "
+                   f"完成 {u['completed']} vs {b['completed']}")
+    p = ev.prune()
+    click.echo(f"\n未使用技能（可淘汰）: {p['unused'] or '无'} (共 {p['total_skills']} 个)")
+
+
+@evolve.command("experience")
+@click.option("--section", default="", help="progress/decision/pitfall/procedure/tool_candidate")
+@click.option("--workspace", default="", help="工作区（默认 data_dir/workspaces/default）")
+def evolve_experience(section: str, workspace: str):
+    """打印项目经验报告。"""
+    import os
+    from research_agent import report as report_mod
+    from research_agent.config import get_data_dir
+    ws = workspace or str(get_data_dir() / "workspaces" / "default")
+    os.makedirs(ws, exist_ok=True)
+    click.echo(report_mod.render_markdown(ws))
+    click.echo(f"\n({len(report_mod.list_entries(ws, section=section or None))} entries)")
+
+
 if __name__ == "__main__":
     main()

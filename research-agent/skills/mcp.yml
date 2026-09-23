@@ -1,8 +1,13 @@
-# MCP Server Configuration
-# Commands are launched via stdio JSON-RPC
-# Tools auto-registered with "mcp_" prefix
+# MCP Server Configuration — the "buy" path for capabilities.
+# Servers are launched via stdio JSON-RPC; their tools auto-register with a
+# "mcp_" prefix under the `mcp` plugin. Prefer this over writing custom plugins.
+# Disable all MCP loading with env RESEARCH_AGENT_MCP=0, or `plugin disable mcp`.
+#
+# Example (uncomment to use):
+#   servers:
+#     - command: ["python", "my_mcp_server.py"]
+#     - command: ["npx", "-y", "mcporter", "run", "exa"]   # Exa semantic search
 
 servers:
-  # Example: a Python MCP server
-  # - command: ["python", "my_mcp_server.py"]
+  # keep an empty command here so nothing is launched by default
   - command: []

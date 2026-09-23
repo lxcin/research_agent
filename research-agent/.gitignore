@@ -35,3 +35,10 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/data_integration_test/
+
+# Downloaded benchmark data (local only)
+tests/_data/
+
+# Quality gate artifacts (CI/local reports)
+quality-artifacts/
+

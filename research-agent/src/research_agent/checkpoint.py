@@ -30,7 +30,7 @@ REF_PREFIX = "refs/research-agent/checkpoints"
 def _run(args: list[str], ws: str, env: dict | None = None, timeout: int = 30):
     try:
         return subprocess.run(["git"] + args, cwd=ws, capture_output=True,
-                              text=True, timeout=timeout, env=env)
+                              text=True, errors="replace", timeout=timeout, env=env)
     except Exception as e:  # noqa: BLE001 - caller inspects
         class _R:
             returncode, stdout, stderr = -1, "", str(e)

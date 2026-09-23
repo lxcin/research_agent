@@ -27,6 +27,13 @@ vector = [
     "chromadb>=0.5",
     "sentence-transformers>=2.0",
 ]
+# Optional: document extraction for the network plugin (web_fetch).
+# trafilatura = high-quality HTML→text (falls back to built-in regex stripper);
+# pypdf = PDF text-layer extraction (falls back to a clear "parser unavailable").
+web = [
+    "trafilatura>=1.6",
+    "pypdf>=4.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

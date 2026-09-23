@@ -32,7 +32,7 @@ class MCPClient:
         try:
             self.process = subprocess.Popen(
                 self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, bufsize=1,
+                stderr=subprocess.PIPE, text=True, errors="replace", bufsize=1,
             )
             self._reader = threading.Thread(target=self._read_loop, daemon=True)
             self._reader.start()

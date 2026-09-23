@@ -28,6 +28,26 @@ def test_build_docker_argv_network_enabled(tmp_path):
     assert argv[i + 1] == "bridge"
 
 
+def test_local_run_command_uses_replace_decoding(monkeypatch, tmp_path):
+    captured = {}
+
+    class _Completed:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(*a, **k):
+        captured.update(k)
+        return _Completed()
+
+    monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
+    cfg = sandbox.SandboxConfig(backend="local")
+    r = sandbox.run_command("echo ok", str(tmp_path), 5, cfg)
+    assert r["success"] is True
+    assert captured.get("errors") == "replace"   # no UnicodeDecodeError on mixed output
+    assert captured.get("text") is True
+
+
 def test_resolve_backend_explicit_docker_unavailable(monkeypatch):
     monkeypatch.setattr(sandbox, "docker_available", lambda *a, **k: False)
     backend, warning = sandbox.resolve_backend(sandbox.SandboxConfig(backend="docker"))

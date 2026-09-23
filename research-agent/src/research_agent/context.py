@@ -27,12 +27,58 @@ def count_tokens(text: str) -> int:
         return len(text) // 4
 
 
+def trim_history(messages: list[dict], max_tokens: int) -> list[dict]:
+    """Mid-turn history trim (bounded cost within a single agent run).
+
+    Keeps the system prefix + the current user message + the most recent tail,
+    dropping the oldest tool/assistant exchanges first. Never leaves an orphan
+    leading `tool` message (which would break function-calling).
+
+    Distinct from `trim_messages` (which truncates a single oversized message).
+    """
+    if not max_tokens or max_tokens <= 0:
+        return messages
+
+    def tok(m: dict) -> int:
+        return count_tokens(m.get("content") or "")
+
+    if sum(tok(m) for m in messages) <= max_tokens:
+        return messages
+    system = [m for m in messages if m.get("role") == "system"]
+    rest = [m for m in messages if m.get("role") != "system"]
+    last_user = max((i for i, m in enumerate(rest) if m.get("role") == "user"), default=-1)
+    head = rest[: last_user + 1] if last_user >= 0 else []
+    body = rest[last_user + 1:] if last_user >= 0 else rest
+
+    budget = max_tokens - sum(tok(m) for m in system) - sum(tok(m) for m in head)
+    kept: list[dict] = []
+    for m in reversed(body):
+        c = tok(m)
+        if budget - c < 0 and kept:
+            break
+        kept.append(m)
+        budget -= c
+    kept.reverse()
+    while kept and kept[0].get("role") == "tool":
+        kept.pop(0)
+    return system + head + kept
+
+
 def build_context(state: AgentState, registry=None, model_name: str = "") -> list[dict]:
     max_tokens = get_max_context_tokens(model_name)
     messages = []
 
     # 1. Identity
     messages.append({"role": "system", "content": BASE_SYSTEM_PROMPT})
+
+    # 1b. Runtime brief — where/what/how (derived at runtime, not hardcoded)
+    try:
+        from research_agent.brief import build_runtime_brief
+        brief = build_runtime_brief(state, getattr(state, "workspace_dir", ""))
+        if brief:
+            messages.append({"role": "system", "content": brief})
+    except Exception:
+        pass
 
     # 2. Tool capabilities — injected later by agent after intent routing
     # (pass tool_names to inject filtered capabilities)
@@ -98,13 +144,29 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
 
     # 5. External skills (YAML .md files) injected as system message before user input
     user_lower = state.user_input.lower()
-    from research_agent.skill_loader import load_skills_from_dir, get_active_skills_context
+    from research_agent.skill_loader import (
+        load_skills_from_dir, get_active_skills_context, matched_skills)
     import os
     skills_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "skills")
     external_skills = load_skills_from_dir(skills_dir)
+    # user (self-evolved) skills live under data_dir/skills — load them too
+    try:
+        from research_agent.config import get_data_dir
+        user_skills_dir = str(get_data_dir() / "skills")
+        external_skills = external_skills + load_skills_from_dir(user_skills_dir)
+    except Exception:
+        pass
     skill_ctx = get_active_skills_context(external_skills, user_lower)
     if skill_ctx:
         messages.append({"role": "system", "content": skill_ctx})
+        # evaluation closed-loop: track which skills were actually used (per trace)
+        try:
+            from research_agent import evolve
+            from research_agent.trace_log import get_trace_id
+            for s in matched_skills(external_skills, user_lower):
+                evolve.note_skill_used(s.name, trace=get_trace_id())
+        except Exception:
+            pass
 
     # 7. User input LAST — freshest in context
     messages.append({"role": "user", "content": state.user_input})

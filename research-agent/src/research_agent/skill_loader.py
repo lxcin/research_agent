@@ -58,19 +58,21 @@ def load_skills_from_dir(dir_path: str) -> list[ExternalSkill]:
     return skills
 
 
+def matched_skills(skills: list[ExternalSkill], user_input: str) -> list[ExternalSkill]:
+    """Skills whose triggers match the input (used for injection and usage stats)."""
+    low = (user_input or "").lower()
+    out = []
+    for skill in skills:
+        if not skill.enabled or not skill.triggers:
+            continue
+        if any(t.lower() in low for t in skill.triggers):
+            out.append(skill)
+    return out
+
+
 def get_active_skills_context(skills: list[ExternalSkill], user_input: str) -> str:
     """Return context to inject for matching skills."""
-    parts = []
-    for skill in skills:
-        if not skill.enabled:
-            continue
-        if skill.triggers:
-            matched = any(t.lower() in user_input.lower() for t in skill.triggers)
-        else:
-            matched = False
-        if not matched and not skill.triggers:
-            continue
-        if not matched:
-            continue
-        parts.append(f"## {skill.name}\n{skill.body}")
-    return "\n\n".join(parts) if parts else ""
+    matched = matched_skills(skills, user_input)
+    if not matched:
+        return ""
+    return "\n\n".join(f"## {s.name}\n{s.body}" for s in matched)

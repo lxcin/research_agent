@@ -48,6 +48,22 @@ research-agent plugin disable memory
 # 开发者诊断
 research-agent diagnose
 
+# 内部质量门禁（测试/覆盖率/安全 → PASS/FAIL + HTML 看板）
+research-agent quality --open
+
+# 运行时全链路审计：追踪→审查→评分（框架有效性）+ 报告
+research-agent audit --report
+
+# 运行时评测遥测：token/费用/时延/工具路径（telemetry 插件默认启用）
+research-agent plugin list            # 查看 telemetry
+# Agent 侧：usage_report / usage_query 工具
+
+# 自进化：经验报告 / 用户技能 / 全链路记录查询
+research-agent evolve experience      # 打印项目经验报告
+research-agent evolve skills          # 列出用户技能
+research-agent evolve list            # 查询晋升记录（全链路审计）
+research-agent evolve report          # 生成自进化报告
+
 # 纯 API 服务（可选）
 PYTHONPATH=src python -m uvicorn research_agent.server:app --host 0.0.0.0 --port 8050
 # → /docs, /api/chat (SSE), /api/diagnostics, ...
@@ -79,6 +95,9 @@ PYTHONPATH=src python -m uvicorn research_agent.server:app --host 0.0.0.0 --port
 | `shell` | shell_exec / check_tasks | core | 命令执行与后台任务（`shell_exec` 需审批） |
 | `subagent` | spawn_subagent | core | 并行子代理编排 |
 | `memory` | memorize / search_memory | optional | 个人长期记忆（写入 / 主动召回） |
+| `web` | web_fetch / web_search | optional | 联网检索与抓取（默认关闭，SSRF 防护，只读不写工作区；见 [docs/NETWORK_PLUGIN.md](docs/NETWORK_PLUGIN.md)） |
+| `evolve` | record_experience / classify_experience / propose_skill / list_experience / list_skills | optional | 自进化：项目经验沉淀 → 用户技能（写入需审批；见 [docs/SELF_EVOLUTION.md](docs/SELF_EVOLUTION.md)） |
+| `telemetry` | usage_report / usage_query | optional | 运行时评测：token/费用/时延/工具路径（MeteredRuntime 观察层，不动循环；见 [docs/EVALUATION.md](docs/EVALUATION.md)） |
 | `diagnostics` | —（行为插件） | optional | 事件流、故障监控、报告 |
 | `mcp` | 动态 | optional | 从外部 MCP server 动态装载工具 |
 

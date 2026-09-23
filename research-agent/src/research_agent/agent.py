@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from typing import Callable
 
@@ -84,6 +85,21 @@ def _detect_pending_task(response: str) -> PendingTask | None:
     return None
 
 
+def _usage_dict(u) -> dict:
+    """Normalize a litellm usage object, PRESERVING provider cache fields
+    (deepseek reports prompt_cache_hit_tokens / prompt_tokens_details.cached_tokens)."""
+    d = {"prompt_tokens": int(getattr(u, "prompt_tokens", 0) or 0),
+         "completion_tokens": int(getattr(u, "completion_tokens", 0) or 0)}
+    hit = getattr(u, "prompt_cache_hit_tokens", None)
+    if hit is not None:
+        d["prompt_cache_hit_tokens"] = int(hit)
+    details = getattr(u, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
+    if cached is not None:
+        d["prompt_tokens_details"] = {"cached_tokens": int(cached)}
+    return d
+
+
 def _parse_json_flex(raw: str):
     text = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
     text = re.sub(r'\n?```\s*$', '', text)
@@ -113,6 +129,12 @@ def _call_llm_with_tools(llm: LLMProvider, messages: list[dict],
              "params": json.loads(tc.function.arguments)}
             for tc in msg.tool_calls
         ]
+    # Additive telemetry fields — the kernel ignores them; the metered runtime
+    # (see telemetry.MeteredRuntime) reads them for usage accounting.
+    u = getattr(resp, "usage", None)
+    if u is not None:
+        result["usage"] = _usage_dict(u)
+    result["model"] = model
     return result
 
 
@@ -134,13 +156,28 @@ def _stream_response_once(llm: LLMProvider, messages: list[dict], emit: EventCal
                       api_key=api_key, stream=True, **kwargs)
     mt = get_max_output_tokens()
     if mt: litellm_kw["max_tokens"] = mt
-    resp = litellm.completion(**litellm_kw)
+    t0 = time.monotonic()
+    try:
+        resp = litellm.completion(**litellm_kw, stream_options={"include_usage": True})
+    except Exception:
+        resp = litellm.completion(**litellm_kw)
     content = ""
+    usage = None
     for chunk in resp:
+        u = getattr(chunk, "usage", None)
+        if u is not None:
+            usage = u
         delta = chunk.choices[0].delta
         if delta.content:
             content += delta.content
             _emit(emit, "reply", {"text": delta.content})
+    # Emit usage through the existing event channel (observed, never in the loop).
+    if emit is not None and usage is not None:
+        payload = {"model": model,
+                   "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+                   "purpose": "answer"}
+        payload.update(_usage_dict(usage))
+        _emit(emit, "llm_usage", payload)
     return content
 
 
@@ -181,7 +218,7 @@ def _auto_validate(state, tc_name, tc_params, messages, on_event):
     for check_name, cmd in ext_checks:
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30,
+                cmd, capture_output=True, text=True, errors="replace", timeout=30,
             )
             if result.returncode != 0:
                 has_error = True
@@ -207,26 +244,41 @@ def _tool_approval_hook(state, tool_name: str, params: dict, emit) -> str | None
     """Host-injected pre-dispatch policy: guardrail + HITL approval.
 
     Called by the runtime before any tool dispatch (runtime is tool-agnostic).
-    Returns None to allow, or a block reason to reject. Currently guards the
-    shell command tool; the guardrail knows tool semantics, not the kernel.
+    Returns None to allow, or a block reason to reject. Two concerns:
+      - shell_exec: deterministic guardrail, HITL only when a danger pattern hits;
+      - any tool whose schema declares requires_approval (e.g. self-evolution
+        writes): always HITL-confirmed. The host knows tool semantics, not the kernel.
     """
-    if tool_name != "shell_exec":
-        return None
-    from research_agent.guardrail import guardrail as g_rail
-    from research_agent.models import Action
-    import uuid as _uuid
-    block_reason = g_rail(Action(action=tool_name, query=params.get("command", "")))
-    if not block_reason:
-        return None
-    confirm_id = str(_uuid.uuid4())[:8]
-    command_text = params.get("command", "")
-    _emit(emit, "confirm_required", {
-        "id": confirm_id, "tool": tool_name,
-        "command": command_text[:200], "reason": block_reason})
-    state._pending_confirms[confirm_id] = {"event": threading.Event(), "approved": False}
-    state._pending_confirms[confirm_id]["event"].wait(timeout=60)
-    confirmed = state._pending_confirms.pop(confirm_id, {}).get("approved", False)
-    return None if confirmed else f"User cancelled: {block_reason}"
+    if tool_name == "shell_exec":
+        from research_agent.guardrail import guardrail as g_rail
+        from research_agent.models import Action
+        import uuid as _uuid
+        block_reason = g_rail(Action(action=tool_name, query=params.get("command", "")))
+        if not block_reason:
+            return None
+        confirm_id = str(_uuid.uuid4())[:8]
+        command_text = params.get("command", "")
+        _emit(emit, "confirm_required", {
+            "id": confirm_id, "tool": tool_name,
+            "command": command_text[:200], "reason": block_reason})
+        state._pending_confirms[confirm_id] = {"event": threading.Event(), "approved": False}
+        state._pending_confirms[confirm_id]["event"].wait(timeout=60)
+        confirmed = state._pending_confirms.pop(confirm_id, {}).get("approved", False)
+        return None if confirmed else f"User cancelled: {block_reason}"
+
+    from research_agent.tools import get_registry
+    tool = get_registry().tools.get(tool_name)
+    if tool is not None and getattr(tool, "requires_approval", False):
+        import uuid as _uuid
+        confirm_id = str(_uuid.uuid4())[:8]
+        reason = f"{tool_name}: 写入/修改状态的操作，需要用户确认"
+        _emit(emit, "confirm_required", {
+            "id": confirm_id, "tool": tool_name, "reason": reason})
+        state._pending_confirms[confirm_id] = {"event": threading.Event(), "approved": False}
+        state._pending_confirms[confirm_id]["event"].wait(timeout=60)
+        confirmed = state._pending_confirms.pop(confirm_id, {}).get("approved", False)
+        return None if confirmed else f"User cancelled: {tool_name} requires approval"
+    return None
 
 
 def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
@@ -234,6 +286,10 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
               workspace_dir: str = "", chat_id: str = "") -> AgentState:
     set_trace_id()
     logger.info(f"run_agent START: {user_input[:80]}")
+    try:
+        state._memory_retrievals = []  # reset per-turn retrieval loop guard
+    except Exception:
+        pass
 
     # ── Diagnostics: record every event + run fault monitor (side-channel) ──
     from research_agent.tools import is_plugin_enabled as is_enabled
@@ -380,7 +436,15 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
         call_llm_with_tools=_call_tools_patchable,
         stream_response=_stream_patchable,
     )
-    FunctionCallingRuntime().run(ctx)
+    base_runtime = FunctionCallingRuntime()
+    runtime = base_runtime
+    if is_enabled("telemetry"):
+        try:
+            from research_agent.telemetry import MeteredRuntime
+            runtime = MeteredRuntime(base_runtime)   # observation only; loop untouched
+        except Exception:
+            runtime = base_runtime
+    runtime.run(ctx)
     # ── Collect file changes as a keep/undo proposal (git-based) ──
     try:
         from research_agent.proposal import ProposalManager
@@ -438,7 +502,9 @@ def _maybe_distill(state: AgentState, workspace_dir: str, chat_id: str, llm: LLM
     try:
         from research_agent.tools import is_plugin_enabled as is_enabled
         from research_agent.config import get_memory_config
-        if not is_enabled("memory") or not get_memory_config().get("enabled", True):
+        mem_cfg = get_memory_config()
+        if (not is_enabled("memory") or not mem_cfg.get("enabled", True)
+                or not mem_cfg.get("distill", True)):
             return
         from research_agent.memory import source as mem_source
         from research_agent.memory import pipeline as mem_pipeline
@@ -525,7 +591,7 @@ def _maybe_compress(workspace_dir: str, chat_id: str, llm: LLMProvider):
             f"2. dead_ends: 尝试过但不可行的方向、被推翻的假设、已验证不可行的方法（保留这些很重要，避免重复犯错）\n"
             f"输出JSON: {{\"conclusions\": \"...\", \"dead_ends\": \"...\"}}\n"
             f"对话:\n{turns_text}"}],
-        max_tokens=200
+        max_tokens=200, purpose="compress"
     )
     indices = [i for i, t in enumerate(old_turns) if t.id]
     mark_compressed(workspace_dir, chat_id, indices, summary)
@@ -534,7 +600,8 @@ def _maybe_compress(workspace_dir: str, chat_id: str, llm: LLMProvider):
         from research_agent import project_manager as pm
         existing_progress = pm.load_progress(workspace_dir)
         progress_prompt = f"基于以下对话，用一句话总结当前项目进度（已完成什么、正在做什么、下一步做什么）:\n{turns_text}"
-        progress = llm.complete([{"role": "user", "content": progress_prompt}], max_tokens=100)
+        progress = llm.complete([{"role": "user", "content": progress_prompt}],
+                                max_tokens=100, purpose="compress")
         new_progress = existing_progress + f"\n[进度] {progress}" if existing_progress else f"[进度] {progress}"
         pm.update_progress(workspace_dir, new_progress)
     except Exception:

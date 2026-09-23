@@ -10,6 +10,15 @@ TOOL_REQUIRED_PARAMS = {
     "file_glob":     ["pattern"],
     "check_tasks":   [],
     "spawn_subagent": ["subtasks"],
+    "web_fetch":     ["url"],
+    "web_search":    ["query"],
+    "record_experience": ["section", "text"],
+    "classify_experience": ["text"],
+    "propose_skill": ["name", "description", "triggers", "body"],
+    "list_experience": [],
+    "list_skills": [],
+    "usage_report": [],
+    "usage_query": ["trace_id"],
 }
 
 
