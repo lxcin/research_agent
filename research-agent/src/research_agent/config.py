@@ -44,7 +44,6 @@ context:
   compress_threshold: 10
   compress_enabled: true   # rolling summarization of old turns
   compress_ratio: 0.6      # trigger when history >= ratio * model context window
-  max_history_tokens: 24000  # mid-turn cap on non-system messages (context trim)
 
 memory:
   enabled: true            # Tier B personal memory write/read
@@ -123,16 +122,11 @@ def get_context_config() -> dict:
         max_tokens = int(ctx.get("max_tokens", 4000))
     except (TypeError, ValueError):
         max_tokens = 4000
-    try:
-        max_history = int(ctx.get("max_history_tokens", 24000))
-    except (TypeError, ValueError):
-        max_history = 24000
     return {
         "max_tokens": max_tokens,
         "compress_threshold": int(ctx.get("compress_threshold", 10)),
         "compress_enabled": bool(ctx.get("compress_enabled", True)),
         "compress_ratio": ratio,
-        "max_history_tokens": max_history,
     }
 
 

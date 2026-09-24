@@ -60,21 +60,60 @@ def _emit(event: EventCallback | None, event_type: str, data: dict):
         event(event_type, data)
 
 
-def _history_budget() -> int:
-    """Mid-turn cap on non-system message tokens (config context.max_history_tokens)."""
-    try:
-        from research_agent.config import get_context_config
-        return int(get_context_config().get("max_history_tokens", 24000))
-    except Exception:
-        return 24000
+_LOOP_HINT = ("[loop_guard] 检测到{detail}。请停止重复：换参数/换工具/换思路，"
+              "或基于现有信息直接作答；不要原样重试。")
 
 
-def _wall_budget() -> float:
-    """Optional wall-clock cap per run (seconds); 0 = unlimited."""
-    try:
-        return float(os.environ.get("RESEARCH_AGENT_MAX_WALL_S", "0") or 0)
-    except ValueError:
-        return 0.0
+class _ProgressGuard:
+    """Deterministic loop/error-streak detector.
+
+    Feedback is attached to the TOOL RESULT content (see `_attach_hint`), not a
+    new system message — so the message structure is unchanged and the prompt
+    cache prefix stays intact.
+    """
+
+    def __init__(self, loop_limit: int = 3, error_limit: int = 3):
+        self.loop_limit = loop_limit
+        self.error_limit = error_limit
+        self._last_sig: str | None = None
+        self._repeat = 0
+        self._last_err: str | None = None
+        self._err_streak = 0
+
+    def note_call(self, name: str, params: dict) -> str | None:
+        try:
+            sig = name + "|" + json.dumps(params, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            sig = name + "|" + str(params)
+        if sig == self._last_sig:
+            self._repeat += 1
+        else:
+            self._last_sig, self._repeat = sig, 1
+        if self._repeat >= self.loop_limit:
+            n = self._repeat
+            self._repeat, self._last_sig = 0, None
+            return _LOOP_HINT.format(detail=f"同一工具以相同参数重复调用（{name} ×{n}）")
+        return None
+
+    def note_result(self, name: str, success: bool) -> str | None:
+        if success:
+            self._err_streak, self._last_err = 0, None
+            return None
+        if name == self._last_err:
+            self._err_streak += 1
+        else:
+            self._last_err, self._err_streak = name, 1
+        if self._err_streak >= self.error_limit:
+            n = self._err_streak
+            self._err_streak = 0
+            return _LOOP_HINT.format(detail=f"工具 {name} 连续失败 {n} 次")
+        return None
+
+
+def _attach_hint(payload: dict, hint: str | None) -> dict:
+    if hint:
+        payload["_loop_hint"] = hint
+    return payload
 
 
 def _default_call_llm(ctx: RuntimeContext, messages, tools):
@@ -190,7 +229,7 @@ class FunctionCallingRuntime(AgentRuntime):
         llm = ctx.llm
         registry = ctx.registry
 
-        from research_agent.context import build_context, trim_history
+        from research_agent.context import build_context
         messages = build_context(state, registry, getattr(llm, "model", ""))
         capabilities = registry.generate_capabilities() if registry else ""
         if capabilities:
@@ -198,18 +237,10 @@ class FunctionCallingRuntime(AgentRuntime):
 
         tools_list = registry.list_for_llm() if registry else []
         total_retries = 0
-        run_started = time.time()
+        guard = _ProgressGuard()
 
         for round_num in range(1, ctx.max_rounds + 1):
             state.round_count = round_num
-            # Cost controls (mid-turn): trim old context to a token budget and
-            # enforce a wall-clock cap, so a long run can't balloon unchecked.
-            messages = trim_history(messages, _history_budget())
-            wall = _wall_budget()
-            if wall and time.time() - run_started > wall:
-                _emit(emit, "thinking", {"text": f"达到运行时长上限 {wall:g}s，收口作答"})
-                state.final_response = _default_stream(ctx, _generate_msgs(messages, state))
-                break
             if total_retries >= MAX_TOTAL_RETRIES:
                 _emit(emit, "thinking", {"text": "重试次数已达上限"})
                 state.final_response = _default_stream(ctx, _generate_msgs(messages, state))
@@ -252,13 +283,19 @@ class FunctionCallingRuntime(AgentRuntime):
 
                 _emit(emit, "tool_start", {"id": tc_id, "name": tc_name, "input": tc_input})
 
+                # Deterministic loop guard: repeated identical calls / error streaks.
+                # Feedback rides in the tool result, not a new message (cache-friendly).
+                loop_hint = guard.note_call(tc_name, tc_input)
+
                 # Pre-dispatch approval policy (host-injected). Kernel is tool-agnostic.
                 if ctx.pre_tool_hook:
                     block_reason = ctx.pre_tool_hook(state, tc_name, tc_input, emit)
                     if block_reason:
                         _emit(emit, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": block_reason}})
+                        payload = _attach_hint({"error": block_reason},
+                                               loop_hint or guard.note_result(tc_name, False))
                         messages.append({"role": "tool", "tool_call_id": tc_id,
-                                         "content": json.dumps({"error": block_reason}, ensure_ascii=False)})
+                                         "content": json.dumps(payload, ensure_ascii=False)})
                         continue
 
                 from research_agent.tools.validate_params import validate_tool_params
@@ -266,8 +303,10 @@ class FunctionCallingRuntime(AgentRuntime):
                 if param_err:
                     total_retries += 1; round_retry += 1
                     _emit(emit, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": param_err}})
+                    payload = _attach_hint({"error": param_err},
+                                           loop_hint or guard.note_result(tc_name, False))
                     messages.append({"role": "tool", "tool_call_id": tc_id,
-                                     "content": json.dumps({"error": param_err}, ensure_ascii=False)})
+                                     "content": json.dumps(payload, ensure_ascii=False)})
                     continue
 
                 result = registry.dispatch(tc_name, tc_input, llm, state, emit)
@@ -286,13 +325,19 @@ class FunctionCallingRuntime(AgentRuntime):
                     if round_retry >= 2:
                         hint += " 请换其他方式回答。"
                     _emit(emit, "tool_end", {"id": tc_id, "name": tc_name, "status": "error", "output": {"error": result.data.get("error", err_detail)[:100]}})
+                    payload = _attach_hint({"error": hint, "stdout": result.data.get("stdout", "")[:300]},
+                                           loop_hint or guard.note_result(tc_name, False))
                     messages.append({"role": "tool", "tool_call_id": tc_id,
-                                     "content": json.dumps({"error": hint, "stdout": result.data.get("stdout", "")[:300]}, ensure_ascii=False)})
+                                     "content": json.dumps(payload, ensure_ascii=False)})
                     continue
 
                 _emit(emit, "tool_end", {"id": tc_id, "name": tc_name, "status": "success", "output": result.data})
+                data = dict(result.data)
+                ok_hint = loop_hint or guard.note_result(tc_name, True)
+                if ok_hint:
+                    data["_loop_hint"] = ok_hint
                 messages.append({"role": "tool", "tool_call_id": tc_id,
-                                 "content": json.dumps(result.data, ensure_ascii=False)})
+                                 "content": json.dumps(data, ensure_ascii=False)})
 
                 if ctx.on_tool_success:
                     ctx.on_tool_success(state, tc_name, tc_input, messages, emit)

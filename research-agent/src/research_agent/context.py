@@ -27,43 +27,6 @@ def count_tokens(text: str) -> int:
         return len(text) // 4
 
 
-def trim_history(messages: list[dict], max_tokens: int) -> list[dict]:
-    """Mid-turn history trim (bounded cost within a single agent run).
-
-    Keeps the system prefix + the current user message + the most recent tail,
-    dropping the oldest tool/assistant exchanges first. Never leaves an orphan
-    leading `tool` message (which would break function-calling).
-
-    Distinct from `trim_messages` (which truncates a single oversized message).
-    """
-    if not max_tokens or max_tokens <= 0:
-        return messages
-
-    def tok(m: dict) -> int:
-        return count_tokens(m.get("content") or "")
-
-    if sum(tok(m) for m in messages) <= max_tokens:
-        return messages
-    system = [m for m in messages if m.get("role") == "system"]
-    rest = [m for m in messages if m.get("role") != "system"]
-    last_user = max((i for i, m in enumerate(rest) if m.get("role") == "user"), default=-1)
-    head = rest[: last_user + 1] if last_user >= 0 else []
-    body = rest[last_user + 1:] if last_user >= 0 else rest
-
-    budget = max_tokens - sum(tok(m) for m in system) - sum(tok(m) for m in head)
-    kept: list[dict] = []
-    for m in reversed(body):
-        c = tok(m)
-        if budget - c < 0 and kept:
-            break
-        kept.append(m)
-        budget -= c
-    kept.reverse()
-    while kept and kept[0].get("role") == "tool":
-        kept.pop(0)
-    return system + head + kept
-
-
 def build_context(state: AgentState, registry=None, model_name: str = "") -> list[dict]:
     max_tokens = get_max_context_tokens(model_name)
     messages = []
