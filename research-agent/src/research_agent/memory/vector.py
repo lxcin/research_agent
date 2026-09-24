@@ -17,6 +17,10 @@ _coll = None
 _coll_lock = threading.Lock()
 _COLLECTION_NAME = "memory_units"
 
+# bge-zh retrieval: prefix the QUERY (not the passages), per the model card.
+# Calibrated on tests/calibrate_confidence.py: improves present/absent separation.
+_QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章："
+
 # Module-level flag readable/toggleable for tests.
 _AVAILABLE = None  # None=unknown, True, False
 
@@ -134,8 +138,11 @@ def query(text: str, n_results: int = 5) -> list[dict]:
     coll = _get_collection()
     if coll is None:
         return []
+    qv = encode_query(text)
+    if qv is None:
+        return []
     try:
-        res = coll.query(query_texts=[text], n_results=n_results)
+        res = coll.query(query_embeddings=[qv.tolist()], n_results=n_results)
     except Exception:
         return []
     if not res or not res["ids"] or not res["ids"][0]:
@@ -153,7 +160,7 @@ def encode_query(text: str):
     if model is None:
         return None
     try:
-        return model.encode([text], normalize_embeddings=True)[0]
+        return model.encode([_QUERY_INSTRUCTION + text], normalize_embeddings=True)[0]
     except Exception:
         return None
 
@@ -166,8 +173,11 @@ def query_with_embeddings(text: str, n_results: int = 5) -> list[dict]:
     coll = _get_collection()
     if coll is None:
         return []
+    qv = encode_query(text)
+    if qv is None:
+        return []
     try:
-        res = coll.query(query_texts=[text], n_results=n_results,
+        res = coll.query(query_embeddings=[qv.tolist()], n_results=n_results,
                          include=["embeddings", "distances"])
     except Exception:
         return []
