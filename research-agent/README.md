@@ -58,6 +58,10 @@ research-agent audit --report
 research-agent plugin list            # 查看 telemetry
 # Agent 侧：usage_report / usage_query 工具
 
+# MCP 外部工具：添加/查看/测试外部 MCP server（写入 skills/mcp.yml）
+research-agent mcp add exa -- npx -y mcporter run exa
+research-agent mcp list
+
 # 自进化：经验报告 / 用户技能 / 全链路记录查询
 research-agent evolve experience      # 打印项目经验报告
 research-agent evolve skills          # 列出用户技能

@@ -3,10 +3,15 @@
 # "mcp_" prefix under the `mcp` plugin. Prefer this over writing custom plugins.
 # Disable all MCP loading with env RESEARCH_AGENT_MCP=0, or `plugin disable mcp`.
 #
-# Example (uncomment to use):
+# Manage via CLI (writes this file):
+#   research-agent mcp add exa -- npx -y mcporter run exa
+#   research-agent mcp add gh --env GITHUB_TOKEN=xxx -- npx -y @modelcontextprotocol/server-github
+#   research-agent mcp list | test <name> | remove <name>
+# Entries support optional `name` and `env`:
 #   servers:
-#     - command: ["python", "my_mcp_server.py"]
-#     - command: ["npx", "-y", "mcporter", "run", "exa"]   # Exa semantic search
+#     - name: exa
+#       command: ["npx", "-y", "mcporter", "run", "exa"]
+#       env: {EXA_API_KEY: "..."}
 
 servers:
   # keep an empty command here so nothing is launched by default

@@ -454,5 +454,82 @@ def evolve_experience(section: str, workspace: str):
     click.echo(f"\n({len(report_mod.list_entries(ws, section=section or None))} entries)")
 
 
+@main.group()
+def mcp():
+    """MCP 外部工具：add / list / remove / test（写入 skills/mcp.yml）。"""
+
+
+@mcp.command("list")
+def mcp_list():
+    """列出已配置的 MCP server 与插件开关状态。"""
+    from research_agent.tools import is_plugin_enabled
+    from research_agent.tools import mcp_loader as M
+    on = is_plugin_enabled("mcp")
+    click.echo(f"mcp 插件: {'enabled' if on else 'disabled'}  (config: {M.default_config_path()})")
+    servers = M.load_servers()
+    if not servers:
+        click.echo("（无配置 server；用 `research-agent mcp add <name> -- <cmd...>` 添加）")
+        return
+    for s in servers:
+        cmd = " ".join(s.get("command") or []) or "(空)"
+        env = s.get("env") or {}
+        click.echo(f"  {M.server_key(s):<16} {cmd}" + (f"  env={list(env)}" if env else ""))
+
+
+@mcp.command("add")
+@click.argument("name")
+@click.argument("command", nargs=-1, required=True)
+@click.option("--env", "envs", multiple=True, help="环境变量 K=V（可多次）")
+def mcp_add(name: str, command, envs):
+    """添加/覆盖一个 MCP server。
+
+    示例：research-agent mcp add exa -- npx -y mcporter run exa
+    """
+    from research_agent.tools import mcp_loader as M
+    env = {}
+    for kv in envs:
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            env[k.strip()] = v
+    M.add_server(name, list(command), env or None)
+    click.echo(f"已添加 server '{name}': {' '.join(command)}")
+
+
+@mcp.command("remove")
+@click.argument("name")
+def mcp_remove(name: str):
+    """按名称移除一个 MCP server。"""
+    from research_agent.tools import mcp_loader as M
+    ok = M.remove_server(name)
+    click.echo("已移除" if ok else f"未找到 server: {name}", err=not ok)
+
+
+@mcp.command("test")
+@click.argument("name")
+def mcp_test(name: str):
+    """连接该 server，列出它暴露的工具后退出。"""
+    from research_agent.tools import mcp_loader as M
+    entry = M.get_server(name)
+    if not entry:
+        click.echo(f"未找到 server: {name}", err=True)
+        raise SystemExit(1)
+    cmd = entry.get("command") or []
+    if not cmd:
+        click.echo("该 server 无 command（占位）", err=True)
+        raise SystemExit(1)
+    click.echo(f"连接 {name}: {' '.join(cmd)} ...")
+    client = M.MCPClient(cmd, env=entry.get("env"))
+    if not client.connect():
+        click.echo("连接失败（检查命令/依赖/网络）", err=True)
+        raise SystemExit(1)
+    try:
+        tools = client.list_tools()
+        click.echo(f"OK：{len(tools)} 个工具")
+        for t in tools:
+            click.echo(f"  - {t.get('name', '')}: {str(t.get('description', ''))[:80]}")
+    finally:
+        client.close()
+
+
 if __name__ == "__main__":
     main()

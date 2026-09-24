@@ -358,11 +358,8 @@ def run_agent(user_input: str, llm: LLMProvider, state: AgentState,
         try:
             from research_agent.tools import is_plugin_enabled as is_enabled
             if is_enabled("mcp"):
-                from research_agent.tools.mcp_loader import MCPManager
-                mcp_config = os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                    "skills", "mcp.yml",
-                )
+                from research_agent.tools.mcp_loader import MCPManager, default_config_path
+                mcp_config = default_config_path()
                 if os.path.exists(mcp_config):
                     manager = MCPManager(mcp_config)
                     import atexit
