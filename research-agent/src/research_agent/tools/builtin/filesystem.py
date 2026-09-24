@@ -128,7 +128,11 @@ def _handle_shell_exec(params: dict, llm, state, emit) -> ToolResult:
         cwd=workdir,
         backend=backend,
         checkpoint=cp_ref,
-        hint="stderr/error above shows what went wrong, use file_edit to fix" if not success else "",
+        # Neutral, accurate failure hint: don't presume the cause is a file that
+        # needs editing (env/command/path errors are common). The model has
+        # returncode + stderr to reason from.
+        hint=(f"命令失败（exit={res.get('returncode')}）；原因见 stderr。"
+              "当前工作目录已是项目目录，无需 cd。" if not success else ""),
     )
 
 

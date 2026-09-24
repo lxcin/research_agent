@@ -13,7 +13,8 @@ def _run_git(args: list[str], cwd: str, timeout: int = 15) -> dict:
     """Run a git command and return structured result."""
     try:
         r = subprocess.run(["git"] + args, cwd=cwd,
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, errors="replace",
+                           timeout=timeout)
         return {
             "success": r.returncode == 0,
             "stdout": r.stdout.strip(),

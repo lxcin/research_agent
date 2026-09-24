@@ -17,6 +17,12 @@ from research_agent.tools.builtin.filesystem import (
     file_read_tool, file_write_tool, file_edit_tool, file_glob_tool, file_grep_tool,
     shell_exec_tool, check_tasks_tool,
 )
+from research_agent.tools.builtin.network import web_fetch_tool, web_search_tool
+from research_agent.tools.builtin.evolve import (
+    record_experience_tool, classify_experience_tool, propose_skill_tool,
+    list_experience_tool, list_skills_tool,
+)
+from research_agent.tools.builtin.telemetry import usage_report_tool, usage_query_tool
 from research_agent.tools.subagent import spawn_subagent_tool
 
 
@@ -86,6 +92,50 @@ def _plugins() -> list[ToolPlugin]:
             owned_packages=["research_agent.diagnostics"],
             test_files=["tests/test_diagnostics.py", "tests/test_diagnostics_phase_e.py"],
             data_dirs=["logs", "diagnostics"],
+        ),
+        # Network access — opt-in (default disabled). Read-only web fetch/search
+        # behind an SSRF-aware URL policy; see tools/builtin/network.py.
+        ToolPlugin(
+            id="web",
+            label="联网检索与抓取（web_search / web_fetch）",
+            enabled=False,
+            tools=[
+                _stamp(web_fetch_tool, "web", "fetch", side_effect=False),
+                _stamp(web_search_tool, "web", "search", side_effect=False),
+            ],
+            owned_files=["research_agent/tools/builtin/network.py"],
+            test_files=["tests/test_network_tools.py"],
+        ),
+        # Self-evolution — distill project experience into reusable user skills.
+        # Writes (propose_skill) require human approval; no plugin authoring here.
+        ToolPlugin(
+            id="evolve",
+            label="自进化（项目经验沉淀 → 用户技能）",
+            enabled=True,
+            tools=[
+                _stamp(record_experience_tool, "evolve", "experience"),
+                _stamp(classify_experience_tool, "evolve", "experience", side_effect=False),
+                _stamp(propose_skill_tool, "evolve", "promote", requires_approval=True),
+                _stamp(list_experience_tool, "evolve", "experience", side_effect=False),
+                _stamp(list_skills_tool, "evolve", "experience", side_effect=False),
+            ],
+            owned_files=["research_agent/tools/builtin/evolve.py"],
+            test_files=["tests/test_evolve.py"],
+        ),
+        # Runtime evaluation telemetry — host calls into research_agent.telemetry
+        # when enabled; exposes read-only usage_report/usage_query tools.
+        ToolPlugin(
+            id="telemetry",
+            label="运行时评测（token/费用/时延/工具路径）",
+            enabled=True,
+            tools=[
+                _stamp(usage_report_tool, "telemetry", "usage", side_effect=False),
+                _stamp(usage_query_tool, "telemetry", "usage", side_effect=False),
+            ],
+            owned_files=["research_agent/telemetry.py",
+                         "research_agent/tools/builtin/telemetry.py"],
+            test_files=["tests/test_telemetry.py"],
+            data_dirs=["usage"],
         ),
         # MCP external tools — dynamic; the plugin is a placeholder whose tools are
         # added at runtime by mcp_loader (each server tools tagged plugin_id="mcp").

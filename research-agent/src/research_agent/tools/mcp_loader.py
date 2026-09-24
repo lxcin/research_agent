@@ -2,6 +2,7 @@
 Connect external MCP servers, auto-register their tools."""
 import json
 import logging
+import os
 import subprocess
 import threading
 from queue import Queue, Empty
@@ -11,11 +12,88 @@ from research_agent.tools.schema import ToolSchema, ToolResult
 logger = logging.getLogger(__name__)
 
 
+def default_config_path() -> str:
+    """Path to the MCP server config (env override: RESEARCH_AGENT_MCP_CONFIG)."""
+    env = os.environ.get("RESEARCH_AGENT_MCP_CONFIG", "")
+    if env:
+        return env
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    return os.path.join(root, "skills", "mcp.yml")
+
+
+def load_servers(config_path: str | None = None) -> list[dict]:
+    path = config_path or default_config_path()
+    if not os.path.isfile(path):
+        return []
+    try:
+        import yaml
+        with open(path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except Exception:
+        return []
+    servers = data.get("servers") if isinstance(data, dict) else None
+    return [s for s in (servers or []) if isinstance(s, dict)]
+
+
+def save_servers(servers: list[dict], config_path: str | None = None) -> str:
+    path = config_path or default_config_path()
+    data = {}
+    if os.path.isfile(path):
+        try:
+            import yaml
+            with open(path, encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data["servers"] = servers
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    import yaml
+    with open(path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)
+    return path
+
+
+def server_key(entry: dict) -> str:
+    return entry.get("name") or " ".join(entry.get("command") or [])
+
+
+def get_server(name: str, config_path: str | None = None) -> dict | None:
+    for s in load_servers(config_path):
+        if server_key(s) == name or s.get("name") == name:
+            return s
+    return None
+
+
+def add_server(name: str, command: list[str], env: dict | None = None,
+               config_path: str | None = None) -> dict:
+    """Add/replace an MCP server entry (matched by name)."""
+    servers = [s for s in load_servers(config_path)
+               if s.get("name") != name and " ".join(s.get("command") or []) != name]
+    entry: dict = {"name": name, "command": list(command)}
+    if env:
+        entry["env"] = {str(k): str(v) for k, v in env.items()}
+    servers.append(entry)
+    save_servers(servers, config_path)
+    return entry
+
+
+def remove_server(name: str, config_path: str | None = None) -> bool:
+    servers = load_servers(config_path)
+    kept = [s for s in servers if server_key(s) != name and s.get("name") != name]
+    if len(kept) == len(servers):
+        return False
+    save_servers(kept, config_path)
+    return True
+
+
 class MCPClient:
     """Single MCP server connection: one process, stdin/stdout JSON-RPC."""
 
-    def __init__(self, command: list[str]):
+    def __init__(self, command: list[str], env: dict | None = None):
         self.command = command
+        self.env = dict(env or {})
         self.process: subprocess.Popen | None = None
         self._rid = 0
         self._lock = threading.Lock()
@@ -30,9 +108,11 @@ class MCPClient:
 
     def connect(self) -> bool:
         try:
+            child_env = {**os.environ, **{str(k): str(v) for k, v in self.env.items()}}
             self.process = subprocess.Popen(
                 self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, bufsize=1,
+                stderr=subprocess.PIPE, text=True, errors="replace", bufsize=1,
+                env=child_env,
             )
             self._reader = threading.Thread(target=self._read_loop, daemon=True)
             self._reader.start()
@@ -157,9 +237,11 @@ class MCPManager:
             cmd = entry.get("command", [])
             if not cmd:
                 return
-            key = " ".join(cmd)
+            name = entry.get("name", "")
+            key = name or " ".join(cmd)
             try:
-                registered = load_from_mcp(cmd, registry, manager=self)
+                registered = load_from_mcp(cmd, registry, manager=self,
+                                           env=entry.get("env"), name=name)
                 results[key] = registered
             except Exception as e:
                 logger.warning(f"MCP server {key} failed to load: {e}")
@@ -214,14 +296,15 @@ def get_mcp_manager() -> MCPManager:
     return _mcp_manager
 
 
-def load_from_mcp(command: list[str], registry=None, manager: MCPManager | None = None) -> list[str]:
+def load_from_mcp(command: list[str], registry=None, manager: MCPManager | None = None,
+                  env: dict | None = None, name: str = "") -> list[str]:
     """Connect to MCP server and register its tools. Returns list of registered names."""
     if registry is None:
         from research_agent.tools import get_registry
         registry = get_registry()
 
-    client = MCPClient(command)
-    key = " ".join(command)
+    client = MCPClient(command, env=env)
+    key = name or " ".join(command)
 
     if manager is None:
         manager = get_mcp_manager()

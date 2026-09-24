@@ -3,6 +3,51 @@
 All notable changes to PaperPilot. Versioning follows the iteration milestones
 (V1 → V4) rather than strict semver.
 
+## [4.3.0] — 2026-09
+
+**Capabilities: web access, self-evolution, runtime evaluation/quality, runtime brief.**
+
+### Added
+- **`web` plugin** (`tools/builtin/network.py`): `web_fetch` / `web_search` behind an
+  SSRF-aware URL policy (scheme allowlist, explicit IP-range guard incl.
+  IPv4-mapped/6to4/NAT64 unwrap, per-hop redirect re-validation, byte/char/time caps,
+  loopback-only `allow_localhost`). Multi-backend fetch (direct → Jina Reader) and
+  search (Exa/Tavily/Serper/DDG ordered routing) + `web-doctor`. Opt-in, read-only.
+- **`evolve` plugin + project-experience report**: distil experience into versioned,
+  toggleable user skills (project report → classify → build → static review → human
+  approval → provenance records). Usage tracking + utility A/B; `research-agent evolve
+  list|report|skills|experience|usage|enable|disable`. Plugin authoring deferred
+  (see `docs/PLUGIN_CONTRACT.md`).
+- **`telemetry` plugin**: runtime evaluation as an **AgentRuntime observation layer**
+  (`MeteredRuntime`, kernel loop untouched) — tokens, cache-aware cost, latency,
+  tool path, phase split; `usage_report`/`usage_query` tools.
+- **Runtime audit + quality gate**: `diagnostics/audit.py` framework scorecard
+  (tool health / convergence / completion / economy); `quality/` gate
+  (pytest+coverage+security thresholds) + self-contained HTML scoreboard, wired into CI.
+- **Runtime brief** (`brief.py`): runtime-derived environment/principal/contract
+  injected before work (correct across OSes, not hardcoded).
+- **MCP CLI**: `research-agent mcp add/list/remove/test` with `name`/`env` config; tools
+  auto-register as `mcp_*`.
+- Docs: `NETWORK_PLUGIN`, `QUALITY`, `SELF_EVOLUTION`, `EVALUATION`, `PLUGIN_CONTRACT`.
+
+### Changed
+- **Memory read path hardened**: per-turn retrieval cap + near-duplicate query
+  rejection + confidence bucket (strong/weak/none) with guidance; bge-zh query
+  instruction + precomputed query embeddings.
+- **Deterministic loop breaker** (`runtime._ProgressGuard`): repeated identical calls
+  / consecutive failures feed back **inside the tool result** (`_loop_hint`) — no extra
+  messages, cache-friendly. Replaces mid-turn context trim / wall-clock budget.
+
+### Fixed
+- Windows subprocess decoding (`errors="replace"`) across shell/git/quality/MCP paths.
+- Preserve provider cache fields in LLM usage + **bill cache-read tokens cheaper**.
+- Neutral shell failure hint (no longer misleadingly points at `file_edit`).
+- IPv6 SSRF false positive (`2001::/23` no longer blanket-blocked).
+
+### Verified
+- 392 deterministic tests (MockLLM, no network/key); `research-agent quality` 6/6 PASS.
+- Real-task telemetry: tool success / cache hit / cost / tool-path captured end-to-end.
+
 ## [4.2.1] — 2026-09
 
 **Aggregate/set queries: agent enumerates by `kind` instead of semantic top-5.**

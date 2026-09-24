@@ -68,7 +68,7 @@ def docker_available(docker_bin: str = "docker") -> bool:
     if shutil.which(docker_bin):
         try:
             r = subprocess.run([docker_bin, "info"], capture_output=True,
-                               text=True, timeout=10)
+                               text=True, errors="replace", timeout=10)
             ok = r.returncode == 0
         except Exception:
             ok = False
@@ -136,10 +136,14 @@ def run_command(command: str, workdir: str, timeout: int,
     try:
         if backend == "docker":
             r = subprocess.run(build_docker_argv(command, workdir, cfg),
-                               capture_output=True, text=True, timeout=timeout)
+                               capture_output=True, encoding="utf-8",
+                               errors="replace", timeout=timeout)
         else:
+            # text=True uses the locale encoding (cp936/UTF-8); errors="replace"
+            # avoids UnicodeDecodeError on mixed-encoding child output (Windows).
             r = subprocess.run(command, shell=True, capture_output=True,
-                               text=True, timeout=timeout, cwd=workdir)
+                               text=True, errors="replace", timeout=timeout,
+                               cwd=workdir)
         return {"success": r.returncode == 0, "backend": backend,
                 "returncode": r.returncode, "stdout": r.stdout,
                 "stderr": r.stderr, "warning": warning}

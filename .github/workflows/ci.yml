@@ -27,6 +27,21 @@ jobs:
           PYTHONPATH=src pytest tests/ -q --tb=short -p no:cacheprovider
         working-directory: research-agent
 
+      - name: Quality gate
+        env:
+          RESEARCH_AGENT_DATA_DIR: ${{ github.workspace }}/research-agent/quality-artifacts
+        run: |
+          pip install pytest-cov
+          PYTHONPATH=src python -m research_agent.quality.gate --workdir . --tests tests/
+        working-directory: research-agent
+
+      - name: Upload quality dashboard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-dashboard
+          path: research-agent/quality-artifacts/quality/quality-latest.html
+
       - name: Check credentials
         run: |
           if grep -rPn "sk-[a-zA-Z0-9]{20,}" src/; then echo "WARNING: API key found" >&2; fi
@@ -40,6 +55,9 @@ jobs:
           test -f docs/SPEC_PROCESS.md && echo "PROCESS OK"
           test -f docs/AGENT_LOG.md && echo "LOG OK"
           test -f docs/REFLECTION.md && echo "REFLECTION OK"
+          test -f docs/QUALITY.md && echo "QUALITY OK"
+          test -f docs/EVALUATION.md && echo "EVALUATION OK"
+          test -f docs/PLUGIN_CONTRACT.md && echo "CONTRACT OK"
         working-directory: research-agent
 
       - name: Run mechanism demo

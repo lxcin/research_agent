@@ -28,7 +28,7 @@ def _git_raw(args: list[str], cwd: str, timeout: int = 15) -> str:
     """
     try:
         r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True,
-                           text=True, timeout=timeout)
+                           text=True, errors="replace", timeout=timeout)
         return r.stdout
     except Exception:
         return ""

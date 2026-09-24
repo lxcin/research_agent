@@ -80,8 +80,10 @@ class MemoryManager:
         vector here (keyword noise), so keyword is not fused in the vector path.
         """
         if vector.is_available():
+            from research_agent.config import get_memory_config
+            pool = max(limit * 4, int(get_memory_config().get("candidate_pool", 40)))
             try:
-                hits = vector.query_with_embeddings(query, n_results=max(limit * 4, 20))
+                hits = vector.query_with_embeddings(query, n_results=pool)
             except Exception:
                 hits = []
             picked = self._mmr_pick(query, hits, scope, kind, limit)
@@ -101,6 +103,8 @@ class MemoryManager:
                 continue
             if kind is not None and u.kind != kind:
                 continue
+            # cosine distance -> similarity score (used for confidence signaling)
+            u.score = round(1.0 - float(h.get("distance", 1.0)), 4)
             filt.append((h, u))
         if not filt:
             return []

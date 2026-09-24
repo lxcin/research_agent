@@ -189,6 +189,19 @@ def test_shell_exec_runs_in_workspace(workspace, state):
         assert "hello" in f.read()
 
 
+def test_shell_exec_failure_hint_is_neutral(workspace, state):
+    result = _handle_shell_exec(
+        {"command": "exit 7"},
+        None, state, _mock_emit,
+    )
+    assert result.success  # the tool ran
+    assert result.data["success"] is False  # the command failed
+    assert result.data["returncode"] not in (0, None)
+    hint = result.data["hint"]
+    assert "file_edit" not in hint          # no misleading cause
+    assert "exit=" in hint and "stderr" in hint
+
+
 def test_shell_exec_blocks_sudo(workspace, state):
     result = _handle_shell_exec(
         {"command": "sudo rm -rf /"},

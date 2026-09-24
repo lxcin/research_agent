@@ -34,6 +34,15 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
     # 1. Identity
     messages.append({"role": "system", "content": BASE_SYSTEM_PROMPT})
 
+    # 1b. Runtime brief — where/what/how (derived at runtime, not hardcoded)
+    try:
+        from research_agent.brief import build_runtime_brief
+        brief = build_runtime_brief(state, getattr(state, "workspace_dir", ""))
+        if brief:
+            messages.append({"role": "system", "content": brief})
+    except Exception:
+        pass
+
     # 2. Tool capabilities — injected later by agent after intent routing
     # (pass tool_names to inject filtered capabilities)
 
@@ -98,13 +107,29 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
 
     # 5. External skills (YAML .md files) injected as system message before user input
     user_lower = state.user_input.lower()
-    from research_agent.skill_loader import load_skills_from_dir, get_active_skills_context
+    from research_agent.skill_loader import (
+        load_skills_from_dir, get_active_skills_context, matched_skills)
     import os
     skills_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "skills")
     external_skills = load_skills_from_dir(skills_dir)
+    # user (self-evolved) skills live under data_dir/skills — load them too
+    try:
+        from research_agent.config import get_data_dir
+        user_skills_dir = str(get_data_dir() / "skills")
+        external_skills = external_skills + load_skills_from_dir(user_skills_dir)
+    except Exception:
+        pass
     skill_ctx = get_active_skills_context(external_skills, user_lower)
     if skill_ctx:
         messages.append({"role": "system", "content": skill_ctx})
+        # evaluation closed-loop: track which skills were actually used (per trace)
+        try:
+            from research_agent import evolve
+            from research_agent.trace_log import get_trace_id
+            for s in matched_skills(external_skills, user_lower):
+                evolve.note_skill_used(s.name, trace=get_trace_id())
+        except Exception:
+            pass
 
     # 7. User input LAST — freshest in context
     messages.append({"role": "user", "content": state.user_input})

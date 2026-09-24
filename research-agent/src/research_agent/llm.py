@@ -21,10 +21,21 @@ class LiteLLMProvider(LLMProvider):
 
     def complete(self, messages: list[dict], **kwargs) -> str:
         import litellm
+        import time
+        purpose = kwargs.pop("purpose", "answer")
         call_kwargs = {"model": self.model, "messages": messages, **self._kwargs, **kwargs}
         if self.api_key:
             call_kwargs["api_key"] = self.api_key
+        t0 = time.monotonic()
         resp = litellm.completion(**call_kwargs)
+        # Telemetry seam: meter non-loop LLM calls (distillation/compression/judge).
+        try:
+            from research_agent import telemetry
+            if telemetry.active():
+                telemetry.note_llm_call(self.model, getattr(resp, "usage", None),
+                                        (time.monotonic() - t0) * 1000, purpose)
+        except Exception:
+            pass
         return resp.choices[0].message.content
 
 

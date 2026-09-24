@@ -4,6 +4,8 @@ PaperPilot is a from-scratch AI agent framework (not a LangGraph/Dify wrapper) b
 
 PaperPilot 是一个自研的 AI Agent 框架（非 LangGraph/Dify 套壳），围绕两个理念设计：**可替换的 Agent 内核** 与 **一切皆能力插件**。它运行 LLM function-calling 循环，内置确定性治理、可插拔工具、对话级 agentic-RAG 记忆，以及面向开发者的可观测性。
 
+> **v4.3.0** — 联网插件 · 自进化(经验→技能) · 运行时评测/质量门禁 · 运行时简报 · MCP CLI
+
 ```
 Host shell (agent.py)          lifecycle: workspace binding · diagnostics · post-run hooks
         │
@@ -11,7 +13,7 @@ Host shell (agent.py)          lifecycle: workspace binding · diagnostics · po
 AgentRuntime (runtime.py)      REPLACEABLE kernel: loop + function calling
         │                        governance/validation injected via RuntimeContext
         ▼
-Tool plugins (tools/)          filesystem · shell · subagent · memory · diagnostics · mcp
+Tool plugins (tools/)          filesystem · shell · subagent · memory · web · mcp · evolve · telemetry · diagnostics
 ```
 
 ---
@@ -19,12 +21,16 @@ Tool plugins (tools/)          filesystem · shell · subagent · memory · diag
 ## 亮点 (Highlights)
 
 - **可替换内核 (Replaceable kernel)** — `AgentRuntime` host/strategy split: the loop knows no concrete tool; governance, tools and context arrive via `RuntimeContext`. Swap the loop (while-ReAct → other strategies) without touching capabilities.
-- **两级工具插件 (Two-level plugins)** — `ToolSchema` (agent-facing granularity: each callable tool) vs `ToolPlugin` (engineering unit: cohesive domain + lifecycle). Runtime install / enable / disable / uninstall with dependency checks and disk-footprint cleanup.
-- **纵深治理 (Deterministic governance)** — regex guardrail + path sandbox + HITL approval + post-write `py_compile/pytest` self-correction. All mock-testable, no API key/network.
-- **对话级 agentic RAG 记忆 (Conversation-level agentic RAG)** — small-model distillation into typed `MemoryUnit`s; the agent autonomously formulates retrieval queries from dialogue and calls the `search_memory` tool. Hybrid keyword + vector (RRF) recall.
-- **可观测性 (Observability)** — every agent event lands in a JSONL event stream; `RunMonitor` detects stalls/repeated-tool/error-streaks; `diagnose` CLI produces reports.
+- **两级工具插件 (Two-level plugins)** — `ToolSchema` (agent-facing granularity) vs `ToolPlugin` (engineering unit: cohesive domain + lifecycle). Runtime install / enable / disable / uninstall with dependency checks and disk-footprint cleanup. **9 plugins / 19 tools**.
+- **纵深治理 + 循环守卫 (Governance + loop breaker)** — regex guardrail + path sandbox + HITL approval + post-write `py_compile/pytest` self-correction; a deterministic `_ProgressGuard` feeds repeated-call / error-streak feedback back **inside the tool result** (no extra messages, cache-friendly). All mock-testable, no API key/network.
+- **对话级 agentic RAG 记忆 (Conversation-level agentic RAG)** — small-model distillation into typed `MemoryUnit`s; the agent autonomously formulates retrieval queries and calls `search_memory`; **vector-first recall + MMR** re-ranking; read path hardened (per-turn cap + near-duplicate rejection + confidence bucket).
+- **联网能力插件 (Web plugin)** — `web_fetch` / `web_search` behind an **SSRF-aware URL policy** (scheme allowlist, IP-range guard incl. IPv4-mapped/6to4/NAT64 unwrap, per-hop redirect re-validation, size caps); multi-backend fetch (direct → Jina Reader) and search (Exa/Tavily/Serper/DDG routing) + `web-doctor`. Opt-in, read-only.
+- **自进化 (Self-evolution)** — distil project experience into **versioned, toggleable user skills** (build → static review → human approval → provenance records), with usage tracking and utility A/B. Follows a build-vs-buy ladder (reuse/MCP first); plugin authoring deferred.
+- **运行时评测 + 质量门禁 (Runtime eval + quality gate)** — `telemetry` (an **AgentRuntime observation layer**, loop untouched) records tokens / **cache-aware cost** / latency / tool paths; `audit` scores framework effectiveness; `quality` gates build+coverage+security and renders an HTML scoreboard, wired into CI.
+- **运行时简报 (Runtime brief)** — a runtime-derived environment/principal/contract brief injected before work (correct across OSes, not hardcoded), to cut wasted environment-guessing rounds.
+- **MCP 外部工具** — import external MCP servers via `research-agent mcp add/list/remove/test` (stdio; tools auto-register as `mcp_*`).
 - **提案式文件改动 (Git-based change proposals)** — agent file edits are staged in the workspace git repo (not auto-committed); after each turn they are shown as a diff and the user decides `keep` (commit) or `undo` (restore/delete), per file or all at once — opencode / Claude Code style.
-- **沙箱化命令执行 + 工作区回滚 (Sandboxed shell + rollback)** — `shell_exec` can run in a one-shot Docker container (network off, workspace-only mount, CPU/mem/pid caps) so the host outside the workspace is protected; before each command the workspace is snapshotted (git), so its writes can be rolled back.
+- **沙箱化命令执行 + 工作区回滚 (Sandboxed shell + rollback)** — `shell_exec` can run in a one-shot Docker container (network off, workspace-only mount, CPU/mem/pid caps); before each command the workspace is snapshotted (git), so its writes can be rolled back.
 
 ---
 
@@ -47,6 +53,26 @@ research-agent plugin disable memory
 
 # 开发者诊断
 research-agent diagnose
+
+# 内部质量门禁（测试/覆盖率/安全 → PASS/FAIL + HTML 看板）
+research-agent quality --open
+
+# 运行时全链路审计：追踪→审查→评分（框架有效性）+ 报告
+research-agent audit --report
+
+# 运行时评测遥测：token/费用/时延/工具路径（telemetry 插件默认启用）
+research-agent plugin list            # 查看 telemetry
+# Agent 侧：usage_report / usage_query 工具
+
+# MCP 外部工具：添加/查看/测试外部 MCP server（写入 skills/mcp.yml）
+research-agent mcp add exa -- npx -y mcporter run exa
+research-agent mcp list
+
+# 自进化：经验报告 / 用户技能 / 全链路记录查询
+research-agent evolve experience      # 打印项目经验报告
+research-agent evolve skills          # 列出用户技能
+research-agent evolve list            # 查询晋升记录（全链路审计）
+research-agent evolve report          # 生成自进化报告
 
 # 纯 API 服务（可选）
 PYTHONPATH=src python -m uvicorn research_agent.server:app --host 0.0.0.0 --port 8050
@@ -79,8 +105,11 @@ PYTHONPATH=src python -m uvicorn research_agent.server:app --host 0.0.0.0 --port
 | `shell` | shell_exec / check_tasks | core | 命令执行与后台任务（`shell_exec` 需审批） |
 | `subagent` | spawn_subagent | core | 并行子代理编排 |
 | `memory` | memorize / search_memory | optional | 个人长期记忆（写入 / 主动召回） |
+| `web` | web_fetch / web_search | optional | 联网检索与抓取（默认关闭，SSRF 防护，只读不写工作区；见 [docs/NETWORK_PLUGIN.md](docs/NETWORK_PLUGIN.md)） |
+| `evolve` | record_experience / classify_experience / propose_skill / list_experience / list_skills | optional | 自进化：项目经验沉淀 → 用户技能（写入需审批；见 [docs/SELF_EVOLUTION.md](docs/SELF_EVOLUTION.md)） |
+| `telemetry` | usage_report / usage_query | optional | 运行时评测：token/费用/时延/工具路径（MeteredRuntime 观察层，不动循环；见 [docs/EVALUATION.md](docs/EVALUATION.md)） |
 | `diagnostics` | —（行为插件） | optional | 事件流、故障监控、报告 |
-| `mcp` | 动态 | optional | 从外部 MCP server 动态装载工具 |
+| `mcp` | 动态（`mcp_*`） | optional | 外部 MCP server（stdio）动态装载；`research-agent mcp add/list/remove/test` 管理，写入 `skills/mcp.yml` |
 
 `research-agent plugin list` 查看；插件开关持久化到 `config.yml` 的 `plugins.<id>.enabled`。
 
@@ -92,27 +121,33 @@ PYTHONPATH=src python -m uvicorn research_agent.server:app --host 0.0.0.0 --port
 research-agent/
 ├── src/research_agent/
 │   ├── agent.py            # Host shell（装配 + 回合后横切）
-│   ├── runtime.py          # 可替换内核：AgentRuntime / FunctionCallingRuntime
+│   ├── runtime.py          # 可替换内核：AgentRuntime / FunctionCallingRuntime + 循环守卫
+│   ├── brief.py            # RuntimeBrief（环境/对象/契约，运行时派生）
 │   ├── proposal.py         # git 提案：收集 diff + keep/undo
 │   ├── checkpoint.py       # 工作区 git 快照 + 回滚（shell 执行前）
 │   ├── sandbox.py          # shell_exec 隔离后端（local / docker）
 │   ├── context.py          # 令牌感知的分层上下文构建
-│   ├── cli.py              # CLI: chat / diagnose / plugin
+│   ├── report.py           # 项目经验报告（自进化沉淀载体）
+│   ├── evolve.py           # 自进化：判定/生成/校验/记录/使用追踪
+│   ├── telemetry.py        # 运行时评测遥测 + MeteredRuntime 观察层
+│   ├── cli.py              # CLI: chat / plugin / quality / audit / mcp / evolve / diagnose
 │   ├── server.py           # FastAPI 纯 API（SSE 流式）
 │   ├── llm.py  config.py   # LLM 抽象 · 配置(API key / data_dir / plugins)
 │   ├── guardrail.py  validate.py  trace_log.py   # 治理 / 校验 / 追踪
 │   ├── models.py  project_manager.py             # 状态模型 · 会话/工作区存储
 │   ├── memory/             # 对话持久化(core) + Tier B 记忆(tier_b/…)
-│   ├── diagnostics/        # recorder / monitor / scan / report / feedback
+│   ├── diagnostics/        # recorder / monitor / scan / report / audit / feedback
+│   ├── quality/            # 质量门禁 collect/gate + HTML 看板
 │   └── tools/
 │       ├── schema.py       # ToolSchema + ToolPlugin
 │       ├── __init__.py     # ToolRegistry（插件 install/uninstall/enable/disable）
-│       ├── builtin/        # filesystem · memory_tool · 插件声明
-│       ├── mcp_loader.py   # MCP 客户端（动态工具）
+│       ├── builtin/        # filesystem · memory · network · evolve · telemetry · 插件声明
+│       ├── mcp_loader.py   # MCP 客户端 + 配置 CRUD（动态工具）
 │       ├── subagent.py     # 子代理
 │       └── git_tool.py     # git checkpoint/rollback
-├── skills/                 # 外部技能定义（YAML 头 + Markdown）
+├── skills/                 # 技能定义 + MCP 配置（mcp.yml）
 ├── my_tools/               # 用户自定义工具（.py）
+├── docs/                   # NETWORK_PLUGIN · QUALITY · SELF_EVOLUTION · EVALUATION · PLUGIN_CONTRACT
 ├── tests/                  # Mock-LLM 确定性测试 + 评测脚本
 ├── Dockerfile.backend      # 后端容器
 ├── docker-compose.yml      # 编排（仅 backend）
@@ -165,6 +200,11 @@ PYTHONPATH=src DEEPSEEK_API_KEY=... python tests/eval_agentic_rag.py   # 对话�
 - **Memory vector layer**：默认关键词检索；语义检索需 `.[vector]` + `RESEARCH_AGENT_MEMORY_VECTOR=1`，缺失时自动降级。
 - **评测规模**：记忆评测为自建小规模集，绝对指标偏乐观；以相对提升与方法论为准。
 - **提案式改动**：需要工作区是 git 仓库（`git_init` 在项目首次创建时自动执行）；非 git 目录下文件改动按原样直接写入。前端仍为 CLI，提案经 CLI 交互审阅。
+- **联网插件**：默认关闭；只支持公开匿名访问，不处理登录态/Cookie；Jina Reader 为第三方降级后端（会看到目标 URL）。
+- **MCP**：仅 stdio 传输（无 HTTP/SSE）；配置在 `skills/mcp.yml`（仓库内）；子进程继承宿主环境变量；工具按未知语义（`side_effect=True`）不在 guardrail/HITL 内。
+- **运行时评测**：缓存命中率依赖 provider 上报（未上报显示 `n/a`）；回合后蒸馏/压缩归因到上一次 run 的 trace；单次输出不设上限。
+- **成本控制**：**不设 token/墙钟硬预算**（有意）；以"检测打转→结果内反馈"为主，`MAX_ROUNDS=50` 为唯一天花板。
+- **自进化**：当前只做 skill 沉淀；Agent 自写插件**未实现**，仅给出契约（[docs/PLUGIN_CONTRACT.md](docs/PLUGIN_CONTRACT.md)）。
 
 ---
 

@@ -1,8 +1,18 @@
-# MCP Server Configuration
-# Commands are launched via stdio JSON-RPC
-# Tools auto-registered with "mcp_" prefix
+# MCP Server Configuration — the "buy" path for capabilities.
+# Servers are launched via stdio JSON-RPC; their tools auto-register with a
+# "mcp_" prefix under the `mcp` plugin. Prefer this over writing custom plugins.
+# Disable all MCP loading with env RESEARCH_AGENT_MCP=0, or `plugin disable mcp`.
+#
+# Manage via CLI (writes this file):
+#   research-agent mcp add exa -- npx -y mcporter run exa
+#   research-agent mcp add gh --env GITHUB_TOKEN=xxx -- npx -y @modelcontextprotocol/server-github
+#   research-agent mcp list | test <name> | remove <name>
+# Entries support optional `name` and `env`:
+#   servers:
+#     - name: exa
+#       command: ["npx", "-y", "mcporter", "run", "exa"]
+#       env: {EXA_API_KEY: "..."}
 
 servers:
-  # Example: a Python MCP server
-  # - command: ["python", "my_mcp_server.py"]
+  # keep an empty command here so nothing is launched by default
   - command: []

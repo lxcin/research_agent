@@ -67,7 +67,8 @@ def extract_units(llm, conversation: str,
     kinds = ", ".join(_ALLOWED_KINDS)
     prompt = EXTRACT_PROMPT.format(kinds=kinds, conversation=conversation[:6000])
     try:
-        raw = llm.complete([{"role": "user", "content": prompt}], max_tokens=600)
+        raw = llm.complete([{"role": "user", "content": prompt}], max_tokens=600,
+                           purpose="extract")
     except Exception:
         return []
     units = []
@@ -136,7 +137,8 @@ def _llm_verdict(llm, a: str, b: str) -> str:
         f"只输出一个词: duplicate/opposite/unrelated"
     )
     try:
-        raw = llm.complete([{"role": "user", "content": prompt}], max_tokens=10)
+        raw = llm.complete([{"role": "user", "content": prompt}], max_tokens=10,
+                           purpose="judge")
     except Exception:
         return "unrelated"
     verdict = raw.strip().lower()
