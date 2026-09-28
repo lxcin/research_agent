@@ -18,6 +18,37 @@ def _filter_tools_dict(all_tools: dict, allowed: list[str] | None) -> dict:
     return {k: v for k, v in all_tools.items() if k in allowed}
 
 
+def _available_tools(all_tools: dict, allowed: list[str] | None) -> dict:
+    """Resolve a sub-agent's toolset.
+
+    `allowed=None` → **read-only tools only** (`side_effect=False`): sub-agents do
+    NOT touch the shared workspace / run commands unless explicitly allowed.
+    `allowed=[...]` → exactly those names; `allowed=[]` → none.
+    """
+    if allowed is None:
+        return {k: v for k, v in all_tools.items()
+                if not getattr(v, "side_effect", True)}
+    return _filter_tools_dict(all_tools, allowed)
+
+
+def _clone_state(state):
+    """Per-sub-agent state copy so concurrent sub-agents don't share mutable
+    bookkeeping (`_current_tool_id` / `_memory_retrievals` / `_pending_confirms`)."""
+    try:
+        import copy
+        s = copy.copy(state)
+        for attr, val in (("_current_tool_id", ""),
+                          ("_memory_retrievals", []),
+                          ("_pending_confirms", {})):
+            try:
+                setattr(s, attr, val)
+            except Exception:
+                pass
+        return s
+    except Exception:
+        return state
+
+
 def _build_subagent_context(
     task: str,
     parent_state,
@@ -68,6 +99,9 @@ def _run_single_subagent(
     registry=None,
     locked_tool_names: list[str] | None = None,
     parent_context: str = "",
+    emit: EventCallback = None,
+    write_lock: "threading.Lock | None" = None,
+    subagent_id: str = "",
 ) -> dict:
     task_text = task.get("task", "")
     allowed_tools = task.get("tools", None)
@@ -75,10 +109,20 @@ def _run_single_subagent(
     context = _build_subagent_context(task_text, state, parent_context)
 
     if registry:
-        all_tools = registry.tools
-        available = _filter_tools_dict(all_tools, allowed_tools)
+        available = _available_tools(registry.tools, allowed_tools)
     else:
         available = {}
+
+    # Isolated per-sub-agent state + tagged event forwarding (observability).
+    sub_state = _clone_state(state)
+
+    def _sub_emit(etype, data):
+        if emit is None:
+            return
+        try:
+            emit(etype, {**(data or {}), "subagent": subagent_id})
+        except Exception:
+            pass
 
     messages = [{"role": "system", "content": context}]
     rounds_used = 0
@@ -115,7 +159,15 @@ def _run_single_subagent(
                 })
                 continue
             try:
-                result = registry.dispatch(name, tc.get("params", {}), llm, state, lambda e, d: None)
+                tool_obj = available.get(name)
+                # Serialize side-effecting tools across sub-agents (shared workspace).
+                if getattr(tool_obj, "side_effect", True) and write_lock is not None:
+                    with write_lock:
+                        result = registry.dispatch(name, tc.get("params", {}), llm,
+                                                   sub_state, _sub_emit)
+                else:
+                    result = registry.dispatch(name, tc.get("params", {}), llm,
+                                               sub_state, _sub_emit)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
@@ -168,32 +220,34 @@ def spawn_subagent(subtasks: list[dict], llm, state, registry,
         return {"success": True, "completed": 0, "failed": 0, "summaries": []}
 
     results_lock = threading.Lock()
+    write_lock = threading.Lock()   # serialize side-effecting tools across sub-agents
     summaries = []
     failed = 0
 
-    def _emit(etype, data):
+    def _emit_ev(etype, data):
         if emit:
             emit(etype, data)
 
-    def _worker(task: dict):
+    def _worker(idx: int, task: dict):
         try:
             result = _run_single_subagent(
                 task, llm, state, max_rounds, registry,
                 locked_tool_names=task.get("tools"),
+                emit=emit, write_lock=write_lock, subagent_id=f"sub{idx}",
             )
             with results_lock:
                 summaries.append(result)
-            _emit("subagent_done", {"task": task.get("task", "")[:60], "success": True})
+            _emit_ev("subagent_done", {"task": task.get("task", "")[:60], "success": True})
             return result
         except Exception as e:
             with results_lock:
                 nonlocal failed
                 failed += 1
-            _emit("subagent_fail", {"task": task.get("task", "")[:60], "error": str(e)})
+            _emit_ev("subagent_fail", {"task": task.get("task", "")[:60], "error": str(e)})
             return None
 
     with ThreadPoolExecutor(max_workers=min(len(subtasks), 6)) as ex:
-        futures = [ex.submit(_worker, t) for t in subtasks]
+        futures = [ex.submit(_worker, i, t) for i, t in enumerate(subtasks)]
         for f in as_completed(futures):
             try:
                 f.result(timeout=120)
@@ -244,7 +298,9 @@ spawn_subagent_tool = ToolSchema(
     description=(
         "Spawn multiple parallel sub-agents to work on independent subtasks. "
         "Each sub-agent runs independently with restricted tool access. "
-        "Use this to divide complex research into parallel work, then results are merged. "
+        "By default a sub-agent may only use READ-ONLY tools; to allow writing/executing "
+        "list them in `tools` — such side-effecting calls are serialized across sub-agents "
+        "(they share the workspace). Results are merged. "
         "Example: 'review 5 papers' → spawn 5 sub-agents each reading one paper."
     ),
     parameters={
