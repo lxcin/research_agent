@@ -22,11 +22,18 @@ def main(ctx: click.Context):
         ctx.invoke(chat_cmd)
 
 
+def _stage_attach(path: str, chat_id: str = "default") -> list[dict]:
+    from research_agent import attachments
+    return attachments.parse_file(path, chat_id=chat_id)
+
+
 @main.command()
 @click.option("--model", default=None, help="LLM model name (e.g. deepseek/deepseek-chat)")
 @click.option("--api-key", default=None, help="API key for the LLM provider")
 @click.option("--api-base", default=None, help="Custom API base URL")
-def chat_cmd(model: str | None, api_key: str | None, api_base: str | None):
+@click.option("--attach", "attach", multiple=True, type=click.Path(),
+              help="随本轮附带的文件/图片路径（可多次；支持代码/PDF/图片/Office）")
+def chat_cmd(model: str | None, api_key: str | None, api_base: str | None, attach):
     """Start interactive chat session."""
     key = api_key or get_api_key()
     if not key:
@@ -35,9 +42,17 @@ def chat_cmd(model: str | None, api_key: str | None, api_base: str | None):
 
     model_name = model or get_model_config().get("name", "deepseek/deepseek-chat")
     click.echo(f"PaperPilot CLI (model: {model_name})")
-    click.echo("Type /exit to quit, /new to start a new conversation.\n")
+    click.echo("Type /exit to quit, /new for a new conversation, /attach <path> to attach a file.\n")
 
     state = AgentState()
+    pending_blocks: list[dict] = []
+    for p in attach:
+        try:
+            pending_blocks += _stage_attach(p)
+            click.echo(f"已附加: {p}")
+        except Exception as e:
+            click.echo(f"附加失败 {p}: {e}", err=True)
+
     while True:
         try:
             user_input = click.prompt("You", prompt_suffix="> ").strip()
@@ -50,7 +65,16 @@ def chat_cmd(model: str | None, api_key: str | None, api_base: str | None):
             break
         if user_input.lower() in ("/new", "/reset"):
             state = AgentState()
+            pending_blocks = []
             click.echo("Starting a new conversation.\n")
+            continue
+        if user_input.lower().startswith("/attach "):
+            p = user_input[len("/attach "):].strip().strip('"')
+            try:
+                pending_blocks += _stage_attach(p)
+                click.echo(f"已附加: {p}（随下一条消息发送）")
+            except Exception as e:
+                click.echo(f"附加失败: {e}", err=True)
             continue
         if not user_input:
             continue
@@ -58,7 +82,9 @@ def chat_cmd(model: str | None, api_key: str | None, api_base: str | None):
         click.echo()
         llm = LiteLLMProvider(model=model_name, api_key=key, api_base=api_base)
         from research_agent.agent import run_agent
+        state.attachment_blocks = pending_blocks
         result = run_agent(user_input, llm, state)
+        pending_blocks = []
         click.echo(result.final_response or "(no response)")
         _handle_proposals(result)
         click.echo()
@@ -529,6 +555,33 @@ def mcp_test(name: str):
             click.echo(f"  - {t.get('name', '')}: {str(t.get('description', ''))[:80]}")
     finally:
         client.close()
+
+
+@main.group()
+def attachments():
+    """附件管理：list / cleanup（chat 级暂存，存 data_dir/attachments/<chat>/）。"""
+
+
+@attachments.command("list")
+@click.option("--chat", default="default", help="会话 id（默认 default）")
+def attachments_list(chat: str):
+    """列出某个会话已暂存的附件。"""
+    from research_agent import attachments as A
+    items = A.list_attachments(chat)
+    if not items:
+        click.echo("（无附件）")
+        return
+    for m in items:
+        click.echo(f"  {m['id']}  {m['kind']:<5} {m['size']}B  {m['filename']}")
+
+
+@attachments.command("cleanup")
+@click.option("--chat", default=None, help="只清某个会话（默认清全部）")
+def attachments_cleanup(chat: str):
+    """清理暂存的附件（随会话回收）。"""
+    from research_agent import attachments as A
+    n = A.cleanup(chat)
+    click.echo(f"已清理 {n} 个附件目录" + (f"（chat={chat}）" if chat else "（全部）"))
 
 
 if __name__ == "__main__":

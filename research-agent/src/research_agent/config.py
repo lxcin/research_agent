@@ -86,6 +86,14 @@ web:
   exa_api_key_env: EXA_API_KEY
   search_max_results: 5
 
+attachments:
+  # 附件（上传/暂存/解析）：chat 级作用域，存 data_dir/attachments/<chat>/<id>/
+  max_mb: 20               # 单文件大小上限
+  image_max_side: 1280     # 图片默认压缩：长边上限（像素）
+  image_quality: 80        # 压缩后 JPEG 质量
+  max_chars: 8000          # 解析文本返回上限
+  pdf_max_pages: 50        # PDF 最多解析页数
+
 projects:
   data_dir: ~/research-agent-data
 """, encoding="utf-8")
@@ -127,6 +135,28 @@ def get_context_config() -> dict:
         "compress_threshold": int(ctx.get("compress_threshold", 10)),
         "compress_enabled": bool(ctx.get("compress_enabled", True)),
         "compress_ratio": ratio,
+    }
+
+
+def get_attachments_config() -> dict:
+    """Attachment staging/parsing settings (research_agent.attachments)."""
+    config = load_config()
+    att = config.get("attachments", {})
+    if not isinstance(att, dict):
+        att = {}
+
+    def _int(key, default):
+        try:
+            return int(att.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "max_mb": _int("max_mb", 20),
+        "image_max_side": _int("image_max_side", 1280),
+        "image_quality": _int("image_quality", 80),
+        "max_chars": _int("max_chars", 8000),
+        "pdf_max_pages": _int("pdf_max_pages", 50),
     }
 
 

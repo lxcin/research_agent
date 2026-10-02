@@ -195,6 +195,7 @@ def _stream_response(llm: LLMProvider, messages: list[dict], emit: EventCallback
 
 def _generate_msgs(messages: list[dict], state) -> list[dict]:
     """Build a plain (no tools) message tail with tool results for final answer."""
+    from research_agent.context import user_content_with_attachments
     tool_msgs = [m for m in messages if m["role"] == "tool"]
     results = []
     for i, tm in enumerate(tool_msgs):
@@ -204,7 +205,7 @@ def _generate_msgs(messages: list[dict], state) -> list[dict]:
         {"role": "system", "content": "=== 工具调用结果 ==="},
         *results,
         {"role": "system", "content": "=== 工具结果结束，回答用户问题 ==="},
-        {"role": "user", "content": state.user_input},
+        {"role": "user", "content": user_content_with_attachments(state)},
     ]
 
 

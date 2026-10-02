@@ -27,6 +27,42 @@ def count_tokens(text: str) -> int:
         return len(text) // 4
 
 
+def user_content_with_attachments(state):
+    """Build the user message content for this turn.
+
+    - no attachments → plain string;
+    - text-only attachments → merge question + file texts into ONE string
+      (leaner and more provider-compatible than a text-only block list);
+    - any image → multimodal block list (question text + text/image blocks).
+    """
+    blocks = getattr(state, "attachment_blocks", None) or []
+    text = getattr(state, "user_input", "") or ""
+    if not blocks:
+        return text
+    has_image = any(isinstance(b, dict) and b.get("type") == "image_url" for b in blocks)
+    if not has_image:
+        parts = [text] + [b.get("text", "") for b in blocks
+                          if isinstance(b, dict) and b.get("type") == "text"]
+        return "\n\n".join(p for p in parts if p)
+    return [{"type": "text", "text": text}, *blocks]
+
+
+def _content_text(content) -> str:
+    """Flatten message content (str, or multimodal block list) to text for counting."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for c in content:
+            if isinstance(c, dict):
+                if c.get("type") == "text":
+                    parts.append(str(c.get("text", "")))
+                elif c.get("type") == "image_url":
+                    parts.append("[image]")
+        return " ".join(parts)
+    return str(content or "")
+
+
 def build_context(state: AgentState, registry=None, model_name: str = "") -> list[dict]:
     max_tokens = get_max_context_tokens(model_name)
     messages = []
@@ -131,8 +167,8 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
         except Exception:
             pass
 
-    # 7. User input LAST — freshest in context
-    messages.append({"role": "user", "content": state.user_input})
+    # 7. User input LAST — freshest in context (attachments merged/attached)
+    messages.append({"role": "user", "content": user_content_with_attachments(state)})
 
     return trim_messages(messages, max_tokens)
 
@@ -148,12 +184,14 @@ def format_turns(turns: list[ConversationTurn]) -> str:
 
 
 def trim_messages(messages: list[dict], max_tokens: int) -> list[dict]:
-    total = sum(count_tokens(m.get("content", "")) for m in messages)
+    total = sum(count_tokens(_content_text(m.get("content", ""))) for m in messages)
     if total <= max_tokens:
         return messages
     result = []
     for m in messages:
         result.append(m)
-        if count_tokens(m.get("content", "")) > max_tokens // 2:
-            m["content"] = m["content"][:max_tokens // 2 * 4] + "..."
+        c = m.get("content", "")
+        # only truncate plain-text content; never mangle multimodal block lists
+        if isinstance(c, str) and count_tokens(c) > max_tokens // 2:
+            m["content"] = c[:max_tokens // 2 * 4] + "..."
     return result
