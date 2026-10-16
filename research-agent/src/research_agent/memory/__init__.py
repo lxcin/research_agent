@@ -1,16 +1,18 @@
 """Conversation persistence (CORE).
 
-Keeps the legacy research_agent.memory conversation-turn API that agent.py and
-older code depend on. Tier B personal memory lives in `research_agent.memory.
-tier_b` and is NOT imported here, so uninstalling Tier B never breaks core.
+Keeps the research_agent.memory conversation-turn API that agent.py and older
+code depend on (re-exported from project_manager). Tier B semantic memory was
+removed; automatic task memory is now episodic (`research_agent.plan`).
 """
 from research_agent.project_manager import save_turn
 from research_agent.models import ConversationTurn
 
 
 def store_turn(workspace_dir: str, chat_id: str, round_number: int,
-               user_msg: str, assistant_msg: str, sections: list[dict] | None = None):
-    save_turn(workspace_dir, chat_id, round_number, user_msg, assistant_msg, sections)
+               user_msg: str, assistant_msg: str, sections: list[dict] | None = None,
+               execution_id: str | None = None):
+    save_turn(workspace_dir, chat_id, round_number, user_msg, assistant_msg, sections,
+              execution_id=execution_id)
 
 
 def get_recent_turns(workspace_dir: str, chat_id: str,

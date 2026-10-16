@@ -1,5 +1,6 @@
 ﻿# Runtime dependencies
 click
+jsonschema>=4.18
 fastapi
 uvicorn
 httpx

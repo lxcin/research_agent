@@ -3,6 +3,167 @@
 All notable changes to PaperPilot. Versioning follows the iteration milestones
 (V1 → V4) rather than strict semver.
 
+## [Unreleased]
+
+- Archive completed tool arguments and full results independently of model
+  history, including small outputs; retain current source excerpts and let
+  tools declare older-result summaries through typed context projections.
+- File tools instruct the agent to inspect current implementations before edits.
+  Reads expose pagination and source ranges; edits return read-back verification,
+  completion state, exact change ranges and before/after content digests.
+
+- Make resume-segment snapshot handoff replayable across cursor publication and
+  reference retirement; preserve old evidence until the new cursor commits.
+- Persist cancellation during network recovery waits instead of leaving stale
+  waiting status in execution inspection.
+- Return confirmed tool network failures as durable observations for the agent;
+  retain reconciliation for uncertain side effects. Model transport suspension
+  remains separate from tool failures.
+
+**Durable network suspension and step recovery for the default kernel.**
+
+- Persist model selection, pending tools and answer phases before interruption;
+  resume a model request without spending another thinking round.
+- Retry transient failures with cancellable backoff, then save `waiting_network`.
+  CLI/API retry the same execution twice more with bounded waits.
+- Reuse committed tool results without repeating effects or approval; retain
+  uncertainty checks for started calls. Record completion workspace evidence
+  for recovery after a process dies before the loop advances.
+- Keep the original file baseline across unchanged resumes; defer final E while
+  suspended. Human workspace changes create a fresh segment and replan context.
+- Expose execution status and stream `reply_reset` when replacing an interrupted
+  answer. Permanent credential errors do not enter network recovery.
+
+**Workspace baselines follow actual execution, including edits between turns.**
+
+- A safe new turn snapshots the current working files and index before retiring
+  old undo evidence. Missing old E no longer blocks admission; unfinished
+  background writers, quarantine and applying/partial undo still do.
+- Unapplied conflict plans expire on successful rollover, invalidating old
+  tokens while retaining conflict files independently for manual cleanup.
+- Snapshot capture without durable E is reported as `undo_unavailable`. Old
+  delivery records are retired after new S; late callbacks cannot revive them.
+- Shared chats remain serial by default; independent worktrees remain opt-in.
+  Completion keeps actual files without creating an automatic Git commit.
+
+**`file_grep`: ripgrep fast path with pure-Python fallback.**
+
+### Changed
+- `file_grep` now uses **ripgrep** (`rg --json`) when available on `PATH`
+  (parallel, skips binary, `--no-ignore` for full-tree parity, `.git` excluded,
+  `--max-filesize 500K`, 30-match cap), and falls back to the previous pure-Python
+  glob+regex scan when `rg` is missing/errors. The tool result gains a `backend`
+  field; `rg` is optional (zero new dependency).
+
+**Session-scoped sandbox: reuse one sandbox across commands (OpenAI SandboxAgent-inspired).**
+
+### Added
+- `SandboxSession` (`sandbox.py`) — a live execution environment reused across
+  commands. Docker sessions start **one long-lived container** (`docker run -d
+  ... sleep infinity`, same hardening flags) and run commands via `docker exec`;
+  local sessions are lightweight handles. Lifecycle: `start/exec/stop/close`,
+  `is_alive()`, context-manager, atexit teardown.
+- `shell.session: ephemeral | persistent` (config) + `shell.idle_timeout`:
+  - `ephemeral` — one session per run, created lazily on first `shell_exec`,
+    reused for the rest of the run, closed at run end (SDK-owned).
+  - `persistent` — one session per **workspace**, living for the process and
+    reused across runs, reclaimed on idle timeout / death (developer-owned).
+- `get_session()/end_run()/close_all_sessions()` resolution helpers; run
+  lifecycle wired in `agent.run_agent` (ephemeral session closed in a `finally`).
+
+### Changed
+- `shell_exec` (foreground) now routes through a **reused session** instead of a
+  per-command container. Background tasks keep the one-shot path (they may
+  outlive the run).
+- `brief.py` reports the session mode alongside the backend.
+
+### Notes
+- Backward compatible: `run_command` / `build_docker_argv` / `resolve_backend` /
+  `SandboxConfig` unchanged; `run_command` remains the one-shot primitive.
+- Rationale: a session-scoped sandbox avoids paying `docker run` (and a git
+  snapshot) per command for a batch of N commands, while keeping ephemeral's
+  clean-start default and adding an explicit persistent mode for stateful work.
+
+**Turn-aligned workspace checkpoints.**
+
+### Added
+- `shell.checkpoint: turn | command | off` (default `turn`) + `get_checkpoint_mode()`
+  (legacy boolean still accepted: `true`→turn, `false`→off).
+- `checkpoint.snapshot_for_run()` — creates the run-level checkpoint before the
+  loop; `run_agent` calls it once per run (shell plugin enabled).
+- `create_checkpoint(..., dedupe=True)` — skips creating a ref when the workspace
+  tree is unchanged (returns the previous ref with `skipped=True`).
+
+### Changed
+- Checkpoint granularity moved from **per-command** to **per-turn** (default):
+  one snapshot per run, shared by all shell commands in that run; `_maybe_checkpoint`
+  now reports the run ref instead of creating one per command. `command` keeps the
+  old finest-grained behavior; `off` disables snapshots.
+
+### Notes
+- Rollback boundary for `turn` is "before this request" — finer per-command undo
+  requires `shell.checkpoint: command`.
+
+**Task planning — plan-as-memory (episodic/procedural).**
+
+### Added
+- `plan` plugin: `plan_update` (register a structured, ordered plan before
+  multi-step work; each step has status + `depends_on` + optional `tools`),
+  `plan_search` (recall similar past plans by goal), and `plan_execute`
+  (DAG scheduling: independent ready steps run in parallel via sub-agents).
+  10 plugins / 22 tools.
+- `research_agent/plan.py` — `Plan`/`PlanStep` model, per-project persistence
+  under the data dir (`projects/<id>/plans/*.json`, never the git workspace),
+  and deterministic keyword-overlap `search_plans`.
+- `research_agent/plan_executor.py` — dependency scheduler: `ready_steps()`
+  (pure) + `execute_plan()` (parallel ready batches, marks done/blocked, detects
+  cycles); dispatch is injected so the scheduler is unit-testable with a fake
+  dispatcher. `plan_execute` wires dispatch to parallel sub-agents.
+- **Decision fields** — `PlanStep.reason` (why this step) + `Plan.decisions`
+  (key decisions) + `Plan.outcome` + `Plan.tools_used`.
+- **Automatic episodic write** — `agent._maybe_save_episode()` records a task
+  episode every run: the explicit plan if one was registered (enriched with the
+  tool path actually used), else a heuristic episode from input + tool path +
+  response. Gated by `plan.auto_episode` (default true); skips runs with no tool
+  activity. Tool path is collected host-side from `tool_start` events.
+- **Vector-first agentic recall** — episodes are indexed with an embedding at
+  save time; `search_plans` ranks vector-first with a jieba/keyword fallback.
+  The agent supplies the query (agentic recall). Embedding helper extracted to
+  `research_agent/embedding.py` (`RESEARCH_AGENT_EMBEDDING`; legacy
+  `RESEARCH_AGENT_MEMORY_VECTOR` honored).
+- **Cross-project episodic recall** — `plan_search` scans **all projects'
+  episodes** by default (`list_all_plans`), with the current project as a
+  tie-break bonus (`prefer_workspace`); `scope=project` restricts to the current
+  project. Rationale: a same-project task's context is usually already in the
+  conversation, so the value is remembering other projects.
+- **Lightweight local episodic DB** — episodes now live in one **SQLite** file
+  (`data_dir/episodes.db`) instead of per-project JSON files: embeddings stored as
+  float32 BLOBs, one row per episode (append-only, `uuid` id, indexes on
+  `created_at`/`workspace`). Recall is vector-first via a cached **numpy** matrix
+  multiply (`_score`) with a jieba-token fallback — no vector DB / no server.
+  Best-effort one-time import of legacy `projects/*/plans/*.json`.
+- **Async episodic distillation** (`research_agent/plan_pipeline.py`) — the run-end
+  automatic memory write now happens **off the request thread**: a small-model
+  `distill_episode` (goal / decisions+reason / steps / outcome) when
+  `plan.distill` is on, else a heuristic fallback, then `save_plan`. `drain()`
+  for tests.
+
+### Removed
+- **Tier B semantic memory (whole subsystem)** — `memory/{models,storage,vector,
+  source,extractor,pipeline,retrieve,tier_b,rerank}.py`, `tools/builtin/memory_tool.py`
+  (`memorize` / `search_memory`), the `memory` plugin, `agent._maybe_distill` /
+  `_persist_pending_task`, `diagnostics/feedback.py`, the context memory hint, and
+  `config.get_memory_config`. Automatic task memory is now episodic
+  (`research_agent.plan`). Core conversation persistence (`memory/__init__.py`)
+  is kept.
+
+### Changed
+- Plugin/tool count: 10 / 22 → **9 / 20**.
+- System prompt tool rules: multi-step/decomposable tasks register a plan via
+  `plan_update` (with `reason`/`decisions`) then run it with `plan_execute`;
+  before a possibly-done task, the agent formulates a query and calls
+  `plan_search` for prior episodic memory (approach/decisions/pitfalls).
+
 ## [4.3.0] — 2026-09
 
 **Capabilities: web access, self-evolution, runtime evaluation/quality, runtime brief.**
@@ -177,3 +338,10 @@ Architecture: replaceable kernel + pluggable capability plugins.**
 
 ## [1.0.0] — 2026-07
 - Initial: LangGraph-based research agent, SQLite + ChromaDB, hybrid retrieval.
+
+
+### 2026-10-16 文件读写与上下文契约 v3
+- 文件读取改为行范围与超长行字符列续读；严格 UTF-8、64 MiB 上限、有界内存流式哈希与读取一致性检查。
+- 编辑显式携带 expected_version，校验会话/工作区内实际已读覆盖；新建声明 absent，过期拒绝并要求主动读取。
+- harness 仅追加过期通知，不恢复源码；轮内按水位及最小节省量批量折叠。
+- 编辑回执增加前后 unified diff、完整差异引用、版本与声明意图，区分完成、失败、部分完成及测试验证。

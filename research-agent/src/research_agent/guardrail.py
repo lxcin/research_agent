@@ -39,10 +39,8 @@ def guardrail(action: Action) -> str | None:
 
 def validate_path(path: str, workspace_root: str) -> str | None:
     """Check if a file path escapes the workspace. Returns block reason or None."""
-    import os
-    resolved = os.path.normpath(os.path.join(workspace_root, path))
-    norm_root = os.path.normpath(workspace_root)
-    if not resolved.startswith(norm_root):
+    from research_agent.path_policy import safe_path
+    if safe_path(workspace_root, path) is None:
         return f"Path escapes workspace: {path}"
     return None
 

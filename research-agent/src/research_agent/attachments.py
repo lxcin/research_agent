@@ -7,7 +7,7 @@ turn's user message.
 
 Policy:
   - chat-scoped lifetime (cleaned with the chat, or `attachments cleanup`);
-  - raw attachments are NOT written to the workspace and NOT stored in Tier B memory;
+  - raw attachments are NOT written to the workspace and NOT stored in long-term memory;
   - deterministic parsing; optional deps missing → explicit error (no silent fallback);
   - type/size allowlist; no execution; no content logging.
 """

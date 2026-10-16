@@ -3,7 +3,8 @@ NOT exposed to LLM. All git operations are internal:
   - git_init: called automatically at project creation
   - git_checkpoint: called automatically by auto-checkpoint after each round
   - should_auto_checkpoint: determines if a round should trigger a checkpoint
-LLM achieves git operations via shell_exec (git log/status/reset)."""
+LLM queries Git through the read-only host git_inspect tool. Mutating operations
+remain in host review/checkpoint/worktree workflows."""
 import os
 import subprocess
 from pathlib import Path
@@ -38,7 +39,7 @@ def _ensure_git_config(project_dir: str):
 def git_init(project_dir: str | Path) -> dict:
     """Initialize a git repository in the project workdir."""
     d = str(project_dir)
-    if os.path.isdir(os.path.join(d, ".git")):
+    if os.path.exists(os.path.join(d, ".git")):
         return {"success": True, "reason": "already initialized"}
 
     result = _run_git(["init"], d)

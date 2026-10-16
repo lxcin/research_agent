@@ -313,6 +313,15 @@ def load_from_mcp(command: list[str], registry=None, manager: MCPManager | None 
     if not client.connect():
         raise RuntimeError(f"Failed to connect to MCP server: {key}")
 
+    ctx = getattr(registry, "lifecycle", None)
+    ctx = ctx.contexts.get("mcp") if ctx is not None else None
+    if ctx is not None:
+        def release_client():
+            client.close()
+            if manager.clients.get(key) is client:
+                manager.clients.pop(key, None)
+        ctx.scope.own(release_client)
+
     tools = client.list_tools()
     registered = []
 

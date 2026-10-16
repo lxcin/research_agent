@@ -17,7 +17,7 @@ import os
 import platform
 import shutil
 
-_SANDBOX_HINT = {"local": "本机直跑(无隔离)", "docker": "一次性容器(隔离)"}
+_SANDBOX_HINT = {"local": "本机直跑(无隔离)", "docker": "会话级容器(隔离, 命令间复用)"}
 
 
 def _interpreter() -> str:
@@ -35,8 +35,9 @@ def _environment_lines(workspace_dir: str) -> list[str]:
     lines += [f"python=`{py}`", f"装包=`{py} -m pip`"]
     try:
         from research_agent.sandbox import get_sandbox_config, resolve_backend
-        backend, _warn = resolve_backend(get_sandbox_config())
-        lines.append(f"sandbox={backend}({_SANDBOX_HINT.get(backend, '')})")
+        cfg = get_sandbox_config()
+        backend, _warn = resolve_backend(cfg)
+        lines.append(f"sandbox={backend}({_SANDBOX_HINT.get(backend, '')})/{cfg.session}")
     except Exception:
         pass
     try:

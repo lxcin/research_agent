@@ -198,25 +198,23 @@ def test_price_snapshot_recorded(temp_data_dir):
     assert "prices_per_1m_usd" in open(snap, encoding="utf-8").read()
 
 
-def test_memory_distill_switch(monkeypatch, temp_data_dir):
-    from research_agent import agent as ag
+def test_episode_auto_write_switch(monkeypatch, temp_data_dir):
+    from research_agent import agent as ag, plan_pipeline
     from research_agent.models import AgentState
     import research_agent.config as cfg
-    called = []
-    monkeypatch.setattr(ag, "_turns_token_count", lambda *a, **k: 0)
-    # distill off → no pipeline submit
-    monkeypatch.setattr(cfg, "get_memory_config",
-                        lambda: {"enabled": True, "distill": False})
-    import research_agent.memory.pipeline as pl
-    monkeypatch.setattr(pl, "submit", lambda *a, **k: called.append(1))
+    submitted = []
+    monkeypatch.setattr(plan_pipeline, "submit_run", lambda **k: submitted.append(k))
     st = AgentState(user_input="x")
-    ag._maybe_distill(st, "/ws", "c", None)
-    assert called == []
-    # distill on → submit reached (source empty → still no submit; just assert no crash)
-    monkeypatch.setattr(cfg, "get_memory_config",
-                        lambda: {"enabled": True, "distill": True})
-    ag._maybe_distill(st, "", "", None)   # empty ws/chat → early return
-    assert called == []
+    st.workspace_dir = "/ws"
+    # auto_episode off → no submit
+    monkeypatch.setattr(cfg, "load_config", lambda: {"plan": {"auto_episode": False}})
+    ag._maybe_save_episode(st, "/ws", "c", tool_path=["shell_exec"])
+    assert submitted == []
+    # on → submit reached
+    monkeypatch.setattr(cfg, "load_config",
+                        lambda: {"plan": {"auto_episode": True, "distill": False}})
+    ag._maybe_save_episode(st, "/ws", "c", tool_path=["shell_exec"])
+    assert len(submitted) == 1
 
 
 def test_telemetry_plugin_registered_and_handlers(temp_data_dir):

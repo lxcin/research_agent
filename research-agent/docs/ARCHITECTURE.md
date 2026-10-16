@@ -1,5 +1,39 @@
 # PaperPilot Architecture & Design Decisions
 
+> 2026-10-16 文件上下文契约 v3：读取按行及字符列分页，编辑显式携带版本并校验本会话已读范围；harness 只通知过期，不恢复源码。轮内只在用量水位批量折叠。见 [文件版本与上下文](TOOL_CONTEXT_AND_EDIT_RECEIPTS.md)。
+
+## 当前执行内核（2026-10-14）
+
+当前内核以 `AgentKernel.run(KernelHost, KernelRequest) -> KernelResult` 为策略入口，默认实现为 `FunctionCallingKernel`。工厂长期持有稳定策略实例；每次请求创建宿主上下文。`AgentRuntime` / `FunctionCallingRuntime` 保留为兼容适配，可用 `MeteredRuntime` 包装。详细契约、循环行为、失败语义和剩余耦合见 [内核架构笔记](KERNEL.md)。
+
+已落地：`kernel.AgentKernel` 通过 `KernelHost` 类型化端口与 `runtime.RuntimeHost` 交互，`run_agent(..., kernel=...)` 可注入替代思考策略。上下文、参数校验、模型传输和工具执行均由宿主承担；旧运行时接口保留为兼容适配。
+
+当前模块职责见 [MODULE_GUIDE.md](MODULE_GUIDE.md)；本页包含历史设计，部分模块已移除。
+
+2026-10-16：工具完整结果和已完成调用参数独立归档；文件工具声明最新读取片段及历史摘要策略，宿主整理消息，Kernel 保持通用。代码实现前检索读取当前实现由工具 usage 注入，不新增读取许可或人工确认；编辑回执包含完成状态、读回核对及变更范围。详见[工具上下文与编辑回执](TOOL_CONTEXT_AND_EDIT_RECEIPTS.md)。
+
+2026-10-16：恢复执行段通过持久交接记录绑定新 S 与执行日志，先提交新指针再释放旧引用；取消状态同步落盘。工具可确认的网络失败由工具层转为失败观察并回灌上下文，模型自身断网才进入宿主等待恢复；副作用未知仍保留核对屏障。细节见[网络恢复](NETWORK_RECOVERY.md)。
+
+已实施基线简化（2026-10-15）：新轮在取得工作区凭证后，以当前文件与 index 为基线，人工轮间修改作为有效输入。旧 E 缺失和未应用的冲突不再阻断安全新轮；新 S 成功后清除旧计划、令牌及消息，独立保留冲突产物。实际残留写入、applying / partial 撤销及隔离标记仍受保护。默认内核现支持网络中断保存、有限自动续跑及重启后的步骤恢复；未知工具副作用仍保守核对。契约见[网络恢复](NETWORK_RECOVERY.md)及[分批计划](WORKSPACE_BASELINE_AND_RECOVERY_PLAN.md)。
+
+范围收敛：默认共享工作区串行执行，在本轮实际修改前取快照，结束后保留文件结果；打开窗口不固定基线。独立 worktree 作为显式可选隔离，既有绑定维持；多窗口同位置并发不作为本阶段核心需求。“并入结果”不隐含自动 Git 提交或跨分支合并。
+
+2026-10-15：工作区操作在 Git 前保存完整意图，中断后通过证据审阅恢复；整轮快照按实际 worktree 隔离，回退逐项还原文件及原始暂存区，强制审阅令牌并记录可核对的中断进度。职责、入口与限制见[工作区创建与回退](WORKSPACE_RECOVERY_AND_ROLLBACK.md)。
+
+2026-10-15：快照改为最近一轮保留，下一轮新基线成功建立后释放旧引用；正在应用/部分失败的撤销阻止换轮，未应用冲突可自动过期。宿主 rollback 服务以执行结束 E 为祖先，将当前 C 与执行前 S 做反向三方合并，按文件恢复并独立处理 index；proposal、CLI 和 HTTP 共用审阅/应用契约，严格快照 restore 继续独立。详见[三方合并与选择性撤销](SELECTIVE_UNDO_PLAN.md)。
+
+2026-10-15：旧引用释放后，git_maintenance 按 common Git 目录归并持久化维护任务，独立隐藏进程保留宽限期执行 GC。服务归属应用宿主，跨会话共享 worker，不占用内核循环或会话任务的排空流程；失败退避并可启动恢复，不强制清理其他窗口资源。见[Git 后台回收](STORAGE_POLICY.md)。
+
+2026-10-15：Git 回收入队/执行共用宿主环境隔离，避免继承仓库选择变量导致目标偏移。后台结束封存接入 checkpoint_events 持久化 outbox：前台关闭、任务终态和 ready 消息独立关联；最后一个受控 writer 解锁前固定结束证据，消费者幂等发布，接入/启动可重放。缺少可信捕获证据时保留并拒绝，不以当前人工文件猜测 E。见[后台快照消息](BACKGROUND_TASKS.md)。
+
+2026-10-15：内置计划和沙箱状态已迁为插件声明的类型化字段；会话保存、任务恢复、子代理隔离与资源清理的现行约定见 [工具与 State 契约](TOOL_STATE_CONTRACTS.md)。
+
+2026-10-15：Docker 统一按单轮任务持有；宿主通过槽位 OS 锁、创建意图记录和容器标签管理崩溃回收，Git 查询通过 filesystem 插件的 git_inspect 注入，不向容器映射共享 Git 元数据。资源归属、恢复入口和真实验收记录见 [Docker 归属与验收](DOCKER_OWNERSHIP_AND_ACCEPTANCE.md)。
+
+2026-10-15：后台命令由宿主 BackgroundTasks 服务持有，通过 Shell 插件注入查询/取消工具，运行时数据库记录任务归属和取消请求；会话关闭、插件停用及应用退出先停止接入、取消再排空，契约和控制入口见 [后台任务生命周期](BACKGROUND_TASKS.md)。
+
+> **注（最新迭代）**：V4-B 的 **Tier B 语义记忆已整体移除**；自动记忆写入改为**任务情景记忆**（`plan.py` / `plan_pipeline.py`，plan-as-memory）。下文 V4-B 保留为历史设计记录。
+
 ## V4 变更摘要 (2026-09)
 
 > 本页主体记录 V3 架构与 10 个决策。V4 在记忆与诊断两处做了结构变更，增量记录于此，正文历史决策保留不动。
@@ -227,3 +261,8 @@ workspace/papers/{arxiv_id}.md  → 可读副本（Markdown）
       _stream_response → token-by-token → 前端
       _save_turn → _maybe_compress → _mark_waiting_if_needed
 ```
+
+
+### 文件上下文最终收敛（2026-10-16）
+
+不引入索引、缓存或片段放行。正常读取一次流式扫描获得正文与哈希，harness 仅用元数据提示过期；编辑校验真实内容版本、唯一 old_string 与已读范围，写前复检。拒绝区分 FILE_CHANGED / NO_MATCH / MULTI_MATCH，指导局部重读。现有执行恢复和工具证据存储保留，不增加文件缓存数据库。

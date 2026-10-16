@@ -1,10 +1,6 @@
 # tests/test_polish.py — Phase F polish verification
-import os
-
 from research_agent.llm import MockLLMProvider
-from research_agent.models import AgentState, Project, ProjectStatus, PendingTask
-from research_agent.agent import _maybe_compress, _detect_pending_task, _persist_pending_task
-from research_agent.memory.tier_b import get_manager, MemoryScope, MemoryKind
+from research_agent.agent import _maybe_compress, _detect_pending_task
 
 
 # ── F.2 token-budget compression ────────────────────────────────────────────
@@ -63,28 +59,3 @@ def test_detect_pending_task_trims_description():
 
 def test_detect_no_pending_when_done():
     assert _detect_pending_task("已完成，HPLC 数据已经全部跑完。") is None
-
-
-def test_persist_pending_task_writes_tier_b(temp_data_dir):
-    state = AgentState(user_input="x")
-    state.active_project = Project(id="proj1", topic="t",
-                                   status=ProjectStatus.WAITING)
-    task = PendingTask(description="需要你手动复现实验", expected_time="2-3h")
-    _persist_pending_task(state, task)
-    mgr = get_manager()
-    units = mgr.list_units(scope=MemoryScope.USER, kind=MemoryKind.TASK)
-    assert any("手动复现" in u.text for u in units)
-
-
-def test_persist_pending_task_skips_short(temp_data_dir):
-    state = AgentState(user_input="x")
-    _persist_pending_task(state, PendingTask(description="好"))
-    assert get_manager().count() == 0
-
-
-def test_persist_pending_task_disabled_by_config(temp_data_dir, monkeypatch):
-    import research_agent.config as cfg
-    monkeypatch.setattr(cfg, "get_memory_config", lambda: {"enabled": False})
-    state = AgentState(user_input="x")
-    _persist_pending_task(state, PendingTask(description="需要你做个任务"))
-    assert get_manager().count() == 0

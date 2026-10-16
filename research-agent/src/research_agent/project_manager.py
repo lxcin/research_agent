@@ -30,15 +30,21 @@ def _get_chats_dir(project_id: str) -> Path:
 
 
 def get_project_id(workspace_dir: str) -> str:
+    from research_agent.session_workspace import project_workspace
+    workspace_dir = str(project_workspace(workspace_dir)) if workspace_dir else workspace_dir
     return hashlib.sha256(workspace_dir.encode()).hexdigest()[:16]
 
 
 def is_project_dir(workspace_dir: str) -> bool:
+    from research_agent.session_workspace import project_workspace
+    workspace_dir = project_workspace(workspace_dir) if workspace_dir else workspace_dir
     marker = Path(workspace_dir) / _WORKSPACE_DIR / "project.json"
     return marker.exists()
 
 
 def init_project(workspace_dir: str, topic: str = "") -> dict:
+    from research_agent.session_workspace import project_workspace
+    workspace_dir = str(project_workspace(workspace_dir)) if workspace_dir else workspace_dir
     project_id = get_project_id(workspace_dir)
     now = datetime.now().isoformat()
     project = {
@@ -111,8 +117,17 @@ def list_chats(workspace_dir: str) -> list[dict]:
 
 
 def create_chat(workspace_dir: str, title: str = "") -> str:
-    project_id = get_project_id(workspace_dir)
     chat_id = f"chat_{uuid.uuid4().hex[:12]}"
+    ensure_chat(workspace_dir, chat_id, title)
+    return chat_id
+
+
+def ensure_chat(workspace_dir: str, chat_id: str, title: str = "") -> None:
+    """Create a stable isolated-session chat without replacing existing history."""
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", chat_id):
+        raise ValueError("Invalid chat id")
+    project_id = get_project_id(workspace_dir)
     now = datetime.now().isoformat()
     chat = {
         "chat_id": chat_id,
@@ -126,8 +141,9 @@ def create_chat(workspace_dir: str, title: str = "") -> str:
     chats_dir = _get_chats_dir(project_id)
     os.makedirs(chats_dir, exist_ok=True)
     with _FILE_LOCK:
-        _write_json(chats_dir / f"{chat_id}.json", chat)
-    return chat_id
+        path = chats_dir / f"{chat_id}.json"
+        if not path.exists():
+            _write_json(path, chat)
 
 
 def load_chat(workspace_dir: str, chat_id: str) -> dict | None:
@@ -164,14 +180,17 @@ def update_chat(workspace_dir: str, chat_id: str, updates: dict) -> bool:
 
 def save_turn(workspace_dir: str, chat_id: str, round_number: int,
               user_message: str, assistant_message: str,
-              sections: list[dict] | None = None) -> None:
+              sections: list[dict] | None = None, execution_id: str | None = None) -> None:
     project_id = get_project_id(workspace_dir)
     chat_path = _get_chats_dir(project_id) / f"{chat_id}.json"
     chat = _read_json(chat_path)
     if not chat:
         return
+    if execution_id and any(t.get("execution_id") == execution_id for t in chat.get("turns", [])):
+        return
     now = datetime.now().isoformat()
     turn = {
+        "execution_id": execution_id,
         "round": round_number,
         "user": user_message,
         "assistant": assistant_message,
@@ -264,6 +283,8 @@ def write_workspace_marker(workspace_dir: str, project_id: str,
 
 
 def read_workspace_marker(workspace_dir: str) -> dict | None:
+    from research_agent.session_workspace import project_workspace
+    workspace_dir = project_workspace(workspace_dir) if workspace_dir else workspace_dir
     marker_path = Path(workspace_dir) / _WORKSPACE_DIR / "project.json"
     return _read_json(marker_path)
 

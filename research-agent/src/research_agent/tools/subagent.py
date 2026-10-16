@@ -45,8 +45,8 @@ def _clone_state(state):
             except Exception:
                 pass
         return s
-    except Exception:
-        return state
+    except Exception as exc:
+        raise RuntimeError("Cannot isolate subagent state; declare a fork policy for live resources") from exc
 
 
 def _build_subagent_context(
@@ -92,6 +92,19 @@ def _merge_summaries(summaries: list[dict], llm) -> str:
 
 
 def _run_single_subagent(
+    task, llm, state, max_rounds=3, registry=None, **kwargs,
+) -> dict:
+    sub_state = _clone_state(state)
+    try:
+        if registry is not None and hasattr(registry, "bind_state"):
+            registry.bind_state(sub_state)
+        return _run_single_subagent_impl(task, llm, sub_state, max_rounds, registry, **kwargs)
+    finally:
+        from research_agent.sandbox import end_run
+        end_run(sub_state)
+
+
+def _run_single_subagent_impl(
     task: dict,
     llm,
     state,
@@ -114,7 +127,11 @@ def _run_single_subagent(
         available = {}
 
     # Isolated per-sub-agent state + tagged event forwarding (observability).
-    sub_state = _clone_state(state)
+    from research_agent.execution import cancellable_call
+    sub_state = state
+    parent_execution = getattr(state, "_execution_id", None)
+    if parent_execution:
+        sub_state._execution_id = f"{parent_execution}/{getattr(state, '_current_tool_id', '')}/{subagent_id}"
 
     def _sub_emit(etype, data):
         if emit is None:
@@ -128,9 +145,12 @@ def _run_single_subagent(
     rounds_used = 0
 
     for round_num in range(1, max_rounds + 1):
+        token = getattr(sub_state, "_cancellation", None)
+        if token is not None:
+            token.check()
         rounds_used = round_num
         try:
-            resp = _call_llm(llm, messages)
+            resp = cancellable_call(lambda: _call_llm(llm, messages), sub_state)
         except Exception as e:
             logger.warning(f"Subagent LLM call failed: {e}")
             break
@@ -150,6 +170,9 @@ def _run_single_subagent(
         messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
 
         for tc in tool_calls:
+            if token is not None:
+                token.check()
+            sub_state._current_tool_id = tc.get("id", "")
             name = tc.get("name", "")
             if name not in available:
                 messages.append({
@@ -181,7 +204,7 @@ def _run_single_subagent(
                 })
 
     try:
-        resp = _call_llm(llm, messages)
+        resp = cancellable_call(lambda: _call_llm(llm, messages), sub_state)
         content = resp.get("content", "")
         try:
             summary = json.loads(content) if content.strip().startswith("{") else {"summary": content}
@@ -199,7 +222,9 @@ def _call_llm(llm, messages: list[dict]) -> dict:
     import litellm
     model = getattr(llm, "model", "openai/deepseek-chat")
     api_key = getattr(llm, "api_key", None)
-    kwargs = getattr(llm, "_kwargs", {})
+    kwargs = dict(getattr(llm, "_kwargs", {}))
+    kwargs.setdefault("timeout", 60)
+    kwargs.setdefault("num_retries", 0)
     resp = litellm.completion(
         model=model, messages=messages,
         temperature=0.3, api_key=api_key, **kwargs,
@@ -335,3 +360,5 @@ spawn_subagent_tool = ToolSchema(
     handler=_spawn_handler,
     category="builtin",
 )
+
+spawn_subagent_tool.parameters["properties"]["subtasks"].update(minItems=1, maxItems=32)

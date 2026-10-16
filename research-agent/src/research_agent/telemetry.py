@@ -198,11 +198,12 @@ class _Run:
         pt, ct = _tokens(usage)
         cached = _cached_tokens(usage)
         cost, known = estimate_cost(model, pt, ct, cached or 0)
+        usage_known = _get(usage, "prompt_tokens") is not None and _get(usage, "completion_tokens") is not None
         self.llm_calls.append({"model": model, "prompt_tokens": pt, "completion_tokens": ct,
                                "cached_tokens": cached if cached is not None else 0,
                                "cache_reported": cached is not None,
                                "latency_ms": round(latency_ms, 1), "cost_usd": cost,
-                               "known_price": known, "purpose": purpose})
+                               "known_price": known and usage_known, "usage_known": usage_known, "purpose": purpose})
 
     def finalize(self, final_response: str) -> dict:
         self.completed = bool((final_response or "").strip())
@@ -237,6 +238,7 @@ class _Run:
             "cached_tokens": cached,
             "cache_hit_rate": cache_hit_rate,   # None = provider未上报
             "cost_usd": cost, "cost_known": not unknown,
+            "usage_complete": all(c.get("usage_known", False) for c in self.llm_calls),
             "llm_latency_ms": round(llm_lat, 1),
             "tool_latency_ms": round(tool_lat, 1),
             "phases_ms": {"planning": round(plan_llm, 1), "execution": round(tool_lat, 1),
@@ -249,43 +251,44 @@ class _Run:
 
 
 _lock = threading.Lock()
-_current: _Run | None = None
-_last_trace: str = ""          # trace of the most recent run (for post-run attribution)
+from contextvars import ContextVar
+_current = ContextVar("telemetry_run", default=None)
+_last_trace = ContextVar("telemetry_last_trace", default="")  # Request-local post-run attribution.
 
 
 def active() -> bool:
     """True during a run; also right after one, so post-run LLM calls
     (memory distillation / context compression) can be attributed."""
-    return _current is not None or bool(_last_trace)
+    return _current.get() is not None or bool(_last_trace.get())
 
 
 def begin_run(trace: str = "", workspace: str = "", chat: str = ""):
-    global _current
     with _lock:
-        _current = _Run(trace, workspace, chat)
+        _current.set(_Run(trace, workspace, chat))
 
 
 def observe(event_type: str, data: dict):
-    if _current is not None:
-        _current.observe(event_type, data)
+    run = _current.get()
+    if run is not None:
+        run.observe(event_type, data)
 
 
 def note_llm_call(model: str, usage, latency_ms: float, purpose: str = "tool_select"):
-    if _current is not None:
-        _current.add_llm(model, usage, latency_ms, purpose)
-    elif _last_trace:
-        _append_post(_last_trace, model, usage, latency_ms, purpose)
+    run = _current.get()
+    if run is not None:
+        run.add_llm(model, usage, latency_ms, purpose)
+    elif _last_trace.get():
+        _append_post(_last_trace.get(), model, usage, latency_ms, purpose)
 
 
 def end_run(final_response: str = "") -> dict | None:
-    global _current, _last_trace
     with _lock:
-        run = _current
-        _current = None
+        run = _current.get()
+        _current.set(None)
     if run is None:
         return None
     rec = run.finalize(final_response)
-    _last_trace = rec.get("trace", "")
+    _last_trace.set(rec.get("trace", ""))
     try:
         path = runs_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -505,6 +508,32 @@ class MeteredRuntime:
         ctx.emit = emit
 
         orig_call = ctx.call_llm_with_tools
+        orig_adapter = getattr(ctx, "model_adapter", None)
+        if orig_adapter is not None:
+            class ObservedAdapter:
+                def select(self, messages, tools, tool_choice="auto"):
+                    started = time.monotonic()
+                    result = orig_adapter.select(messages, tools, tool_choice)
+                    note_llm_call(result.get("model") or getattr(ctx.llm, "model", ""),
+                                  result.get("usage"), (time.monotonic() - started) * 1000, "tool_select")
+                    return result
+
+                def answer(self, messages, callback):
+                    # Answer usage already travels through ctx.emit. Do not count it twice.
+                    reported = False
+                    started = time.monotonic()
+                    def forward(kind, data):
+                        nonlocal reported
+                        if kind == "llm_usage":
+                            reported = True
+                        if callback:
+                            callback(kind, data)
+                    result = orig_adapter.answer(messages, forward)
+                    if not reported:
+                        note_llm_call(getattr(ctx.llm, "model", ""), None,
+                                      (time.monotonic() - started) * 1000, "answer")
+                    return result
+            ctx.model_adapter = ObservedAdapter()
         if orig_call is not None:
             def call(llm, messages, tools, tool_choice="auto"):
                 t0 = time.monotonic()
@@ -521,6 +550,10 @@ class MeteredRuntime:
         try:
             return self.base.run(ctx)
         finally:
+            ctx.emit = orig_emit
+            ctx.call_llm_with_tools = orig_call
+            if orig_adapter is not None:
+                ctx.model_adapter = orig_adapter
             rec = end_run(getattr(ctx.state, "final_response", "") or "")
             if rec and orig_emit:
                 try:

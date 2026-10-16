@@ -8,15 +8,11 @@ BASE_SYSTEM_PROMPT = """You are PaperPilot, a general personal assistant.
 你是 PaperPilot，一个通用个人助手。直接做事，不要解释过程，不要长篇计划。最终回复格式：简短结果总结 + 下一步建议（可选）。
 
 回复规则：
-- 文件创建/编辑成功后：只说"已创建 xxx"或"已修改 xxx"，不要重复输出文件内容
+- 汇报操作结果时，以工具确认的完成状态和影响范围为准；不要重复粘贴大段内容
 - 工具调用失败时：简短说明失败原因和建议
-- 涉及用户本人的问题（偏好/说过的事/领域/历史决定）：调用 search_memory 查询长期记忆后再回答，不要凭空编造
-- 用户明确要求记住某信息时：调用 memorize
 - 最终回复永远不要包含道歉、"我可以帮你"、自我评价之类的话
 - 不要在第一句说"正在xxx..."——直接给出结果
-
-工具规则：
-- file_write 成功后不要用 shell_exec 验证，除非用户要求"""
+"""
 
 
 def count_tokens(text: str) -> int:
@@ -103,20 +99,6 @@ def build_context(state: AgentState, registry=None, model_name: str = "") -> lis
             proj += f"\n研究笔记({len(entries)}条):\n" + "\n".join(recent)
         messages.append({"role": "system", "content": proj})
 
-    # 4. Personal-memory meta hint (NOT memory content — content only comes via
-    #    the search_memory tool which the LLM invokes itself, agentic RAG read).
-    try:
-        from research_agent.tools import is_plugin_enabled as is_enabled
-        if is_enabled("memory"):
-            messages.append({"role": "system", "content":
-                "关于用户本人的问题（偏好/说过的事/领域/历史决定），调用 search_memory 查询长期记忆后再回答；"
-                "若用户要求\"列出所有/有哪些/全部的某类信息\"（如所有偏好、踩过的坑、做过的决定），"
-                "这是集合查询：用 search_memory(kind=对应类型, limit=20) 做结构化枚举，不要只做语义 top-5；"
-                "kind 取值：fact/preference/decision/task/dead_end/insight/reference/style。"
-                "用户明确要求记住某信息时调用 memorize。不要凭空编造用户记忆。"})
-    except Exception:
-        pass
-
     # 5. Conversation history
     if hasattr(state, 'conversation_turns') and state.conversation_turns:
         compressed = [t for t in state.conversation_turns if t.compressed and t.summary]
@@ -184,14 +166,5 @@ def format_turns(turns: list[ConversationTurn]) -> str:
 
 
 def trim_messages(messages: list[dict], max_tokens: int) -> list[dict]:
-    total = sum(count_tokens(_content_text(m.get("content", ""))) for m in messages)
-    if total <= max_tokens:
-        return messages
-    result = []
-    for m in messages:
-        result.append(m)
-        c = m.get("content", "")
-        # only truncate plain-text content; never mangle multimodal block lists
-        if isinstance(c, str) and count_tokens(c) > max_tokens // 2:
-            m["content"] = c[:max_tokens // 2 * 4] + "..."
-    return result
+    """Compatibility entry: preserve text; host budgets after tool injection."""
+    return list(messages)

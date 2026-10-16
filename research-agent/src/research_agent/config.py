@@ -46,23 +46,26 @@ context:
   compress_ratio: 0.6      # trigger when history >= ratio * model context window
 
 memory:
-  enabled: true            # Tier B personal memory write/read
-  distill: true            # post-turn async distillation (LLM cost) — turn off to save cost
-  max_inject_tokens: 1500  # read path context budget (Phase C)
-  max_retrievals: 4        # per-turn retrieval cap (loop guard)
-  candidate_pool: 40       # stage-1 recall pool before MMR re-rank
-  confidence_strong: 0.60  # top-1 cosine >= this => confident hit (calibrated, bge-zh)
-  confidence_weak: 0.53    # >= this => weak (retry once); below => likely absent
-  # vector: set env RESEARCH_AGENT_MEMORY_VECTOR=1 to enable embedding layer
+  # Tier B semantic memory was removed — automatic task memory is now episodic
+  # (see the `plan` section below / research_agent.plan).
 
 shell:
   backend: auto            # auto / local / docker  (docker = isolated sandbox)
+  session: ephemeral       # 每轮任务内复用，结束后回收；不支持跨轮常驻
+  max_containers: 2        # 受管理的存活容器上限；达到上限拒绝启动，不降级为本地执行
+  shared_mounts: []        # [{source: 绝对宿主路径, target: /shared/dataset}]，始终只读
   image: python:3.11-slim  # container image used when backend resolves to docker
   network: false           # false = no network access inside the sandbox
   memory: 512m             # container memory cap
   cpus: "1.0"              # container CPU cap
   pids_limit: 256          # container process cap (fork-bomb guard)
-  checkpoint: true         # snapshot workspace (git) before shell_exec for rollback
+  checkpoint: turn         # 最近一轮快照: turn(每回合一次,默认) / off；旧 command 配置按 turn 处理
+
+plan:
+  auto_episode: true       # 回合结束后自动把任务写成情景记忆(有工具调用或显式计划时)
+  distill: true            # 用小模型提炼情景(目标/决策/步骤)；false=纯启发式(不花 token)
+  cross_project: true      # plan_search 默认跨项目召回(同项目仅作 tie-break 加权)
+  # 向量召回复用 embedding 层：设 RESEARCH_AGENT_EMBEDDING=1 开启(否则 jieba 关键词回退)
 
 web:
   # 联网插件（默认关闭；research-agent plugin enable web）
@@ -99,25 +102,6 @@ projects:
 """, encoding="utf-8")
 
 
-def get_memory_config() -> dict:
-    config = load_config()
-    mem = config.get("memory", {})
-    def _f(key, default):
-        try:
-            return float(mem.get(key, default))
-        except (TypeError, ValueError):
-            return default
-    return {
-        "enabled": bool(mem.get("enabled", True)),
-        "distill": bool(mem.get("distill", True)),
-        "max_inject_tokens": int(mem.get("max_inject_tokens", 1500)),
-        "max_retrievals": int(mem.get("max_retrievals", 4)),
-        "candidate_pool": int(mem.get("candidate_pool", 40)),
-        "confidence_strong": _f("confidence_strong", 0.60),
-        "confidence_weak": _f("confidence_weak", 0.53),
-    }
-
-
 def get_context_config() -> dict:
     """Context/history management settings (compression trigger, ratio, ...)."""
     config = load_config()
@@ -130,11 +114,18 @@ def get_context_config() -> dict:
         max_tokens = int(ctx.get("max_tokens", 4000))
     except (TypeError, ValueError):
         max_tokens = 4000
+    try:
+        soft_watermark = min(1.0, max(0.1, float(ctx.get("soft_watermark", 0.8))))
+        min_fold_tokens = max(1, int(ctx.get("min_fold_tokens", 512)))
+    except (TypeError, ValueError, OverflowError):
+        soft_watermark, min_fold_tokens = 0.8, 512
     return {
         "max_tokens": max_tokens,
         "compress_threshold": int(ctx.get("compress_threshold", 10)),
         "compress_enabled": bool(ctx.get("compress_enabled", True)),
         "compress_ratio": ratio,
+        "soft_watermark": soft_watermark,
+        "min_fold_tokens": min_fold_tokens,
     }
 
 
