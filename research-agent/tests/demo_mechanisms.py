@@ -110,7 +110,7 @@ def demo_tool_dispatch():
 
         # Dispatch file_write
         result = registry.dispatch(
-            "file_write", {"path": "hello.py", "content": "print(1)"},
+            "file_write", {"expected_version": "absent", "path": "hello.py", "content": "print(1)"},
             None, state, mock_emit,
         )
         assert result.success, f"file_write should succeed, got: {result.data}"

@@ -26,6 +26,8 @@ class LiteLLMProvider(LLMProvider):
         call_kwargs = {"model": self.model, "messages": messages, **self._kwargs, **kwargs}
         if self.api_key:
             call_kwargs["api_key"] = self.api_key
+        call_kwargs.setdefault("timeout", 60)
+        call_kwargs.setdefault("num_retries", 0)
         t0 = time.monotonic()
         resp = litellm.completion(**call_kwargs)
         # Telemetry seam: meter non-loop LLM calls (distillation/compression/judge).

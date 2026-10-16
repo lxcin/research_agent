@@ -3,6 +3,7 @@ Uses MockLLMProvider — no real LLM, no network."""
 
 import json
 import os
+import hashlib
 import tempfile
 from unittest.mock import patch
 
@@ -49,7 +50,7 @@ def test_guardrail_blocks_dangerous_command_mock_loop():
                    side_effect=mock_call_tools), \
              patch('research_agent.agent._stream_response',
                    side_effect=mock_stream), \
-             patch('threading.Event.wait', return_value=False):
+             patch('research_agent.agent._wait_for_approval', return_value=False):
             state = AgentState()
             result = run_agent("test dangerous command", llm, state, on_event,
                                workspace_dir=tmpdir, chat_id=chat_id)
@@ -90,12 +91,12 @@ def test_feedback_loop_corrects_syntax_error():
             # Round 1: file_write with syntax error
             {"content": None, "tool_calls": [
                 {"id": "call_1", "name": "file_write",
-                 "params": {"path": "broken.py", "content": "def foo(:\n    pass\n"}}
+                 "params": {"expected_version": "absent", "path": "broken.py", "content": "def foo(:\n    pass\n"}}
             ]},
             # Round 2: file_write corrected version
             {"content": None, "tool_calls": [
                 {"id": "call_2", "name": "file_write",
-                 "params": {"path": "broken.py", "content": "def foo():\n    pass\n"}}
+                 "params": {"expected_version": hashlib.sha256(b"def foo(:\n    pass\n").hexdigest(), "path": "broken.py", "content": "def foo():\n    pass\n"}}
             ]},
             # Round 3: text response → loop ends
             {"content": "All fixed.", "tool_calls": []},
@@ -156,7 +157,7 @@ def test_tool_registry_dispatch():
 
         # Dispatch file_write
         result = registry.dispatch("file_write",
-                                   {"path": "hello.py", "content": "print(1)"},
+                                   {"expected_version": "absent", "path": "hello.py", "content": "print(1)"},
                                    None, state, mock_emit)
         assert result.success, f"file_write should succeed, got: {result.data}"
         hello_path = os.path.join(tmpdir, "hello.py")
@@ -203,7 +204,7 @@ def test_round_limit_terminates():
                 "content": None,
                 "tool_calls": [
                     {"id": "call_r", "name": "file_write",
-                     "params": {"path": "round.txt", "content": "round"}}
+                     "params": {"expected_version": "absent", "path": "round.txt", "content": "round"}}
                 ]
             }
 

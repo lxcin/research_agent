@@ -7,9 +7,7 @@ from research_agent.models import AgentState
 from research_agent import validate as val
 from research_agent.diagnostics import scan as diag_scan
 from research_agent.diagnostics import report as diag_report
-from research_agent.diagnostics import feedback as diag_feedback
 from research_agent.diagnostics.recorder import EventRecorder
-from research_agent.memory.tier_b import get_manager, MemoryScope, MemoryKind
 
 
 # ── E.1 rules ───────────────────────────────────────────────────────────────
@@ -110,27 +108,6 @@ def test_report_write_and_render(temp_data_dir):
     assert os.path.isfile(out["json_path"])
     assert "工具连续失败" in out["markdown"] or "error_streak" in out["markdown"]
     assert diag_report.latest_report(data_dir=temp_data_dir) == out["md_path"]
-
-
-# ── E.5 feedback to Tier B memory ───────────────────────────────────────────
-
-def test_ingest_fault_lessons_writes_dead_end(temp_data_dir):
-    mgr = get_manager()
-    n = diag_feedback.ingest_fault_lessons(
-        {"error_streak": 3, "tool_loop": 4, "empty_streak": 1},
-        mgr=mgr, min_count=2)
-    assert n >= 2
-    units = mgr.list_units(scope=MemoryScope.USER, kind=MemoryKind.DEAD_END)
-    assert any("error_streak" in u.source.get("fault", "") for u in units)
-    assert all("empty_streak" not in (u.source.get("fault", "")) for u in units)
-
-
-def test_ingest_fault_lessons_dedup(temp_data_dir):
-    mgr = get_manager()
-    diag_feedback.ingest_fault_lessons({"no_response": 5}, mgr=mgr, min_count=2)
-    first = mgr.count()
-    diag_feedback.ingest_fault_lessons({"no_response": 5}, mgr=mgr, min_count=2)
-    assert mgr.count() == first
 
 
 # ── E.4 CLI diagnose command smoke ──────────────────────────────────────────

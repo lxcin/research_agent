@@ -42,3 +42,6 @@ tests/_data/
 # Quality gate artifacts (CI/local reports)
 quality-artifacts/
 
+
+# Generated local acceptance reports
+artifacts/

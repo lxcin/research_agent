@@ -1,4 +1,6 @@
-# 运行时评测（telemetry 插件）
+# 评测：运行健康、任务正确性与策略对照
+
+任务验收与同任务策略对照已接入插件声明和显式执行入口。运行 `research-agent evaluation list` 查看用例，`research-agent evaluation run --output reports/tasks` 生成 JSON/Markdown 报告。实现、扩展契约、门禁与验收边界见 [TASK_EVALUATION.md](TASK_EVALUATION.md)。下文主要记录运行时 telemetry 的观察机制，费用和“产出回答”不等同于任务正确性。
 
 > 目标：在**真实运行**过程中采集评测数据（token/费用/时延/工具路径/任务规划与完成的成本），
 > 做评分与问题分析。**评测不进入 agent 循环**——它是运行时观察层。
@@ -73,7 +75,7 @@ research-agent plugin list            # telemetry 默认启用
 
 ## 7. 开关、价格留痕、评分与看板
 
-- **记忆蒸馏可关**：`memory.distill: false` 关闭回合后蒸馏（省 LLM 花费），读取路径不受影响；配置见 `config.get_memory_config()`。
+- **情景记忆蒸馏可关**：`plan.distill: false` 关闭回合后小模型提炼（省 LLM 花费，回退启发式），读取路径不受影响；配置见 `config`。Tier B 语义记忆已移除，自动记忆写入改为任务情景（`research_agent.plan`）。
 - **缓存留痕 + 折扣计价**：记录 `cached_tokens` 与 `cache_hit_rate`（`prompt_tokens_details.cached_tokens` / `prompt_cache_hit_tokens`）；**命中 token 按缓存价计费**（`prices` 第三项，缺省等于 input），provider 未上报时为 `None`、显示 `n/a（未上报）`。
 - **上下文增长指标**：`max_prompt_tokens`（单轮最大 prompt）与 `tokens_per_round`，用于诊断"轮次↑→累计 prompt 超线性↑→成本↑"。
 - **工具成功按结果判定**：`tool_end` 的 `output.success=false` 或非零 `returncode`（如 shell 命令失败）计为**失败**，而不只是"未抛异常"。
@@ -86,3 +88,13 @@ research-agent plugin list            # telemetry 默认启用
 ## 8. 边界与后续
 - 价格表为快照，`telemetry.prices` 覆盖；
 - 后续：同任务基线 P50/P95 对比与阈值告警；把经济性拆成独立门禁（只告警）。
+
+## 声明式评测扩展
+
+新增 EvaluationSpec(id, target, dimension, check) 与统一 EvaluationRegistry。dimension 区分 harness/task/strategy；检查返回 pass/fail/skip/error，不把缺失证据当成功。ToolPlugin.evaluations 声明跨工具检查，ToolSchema.evaluations 声明工具特定检查，统一按插件生命周期注册与撤销。无需将评测对象伪装成可调用工具，也不把验收提示注入模型。
+
+ToolRegistry.evaluate(events, artifacts) 提供统一入口；audit 的结构化报告附带 evaluations，原总分保持原语义，不把新检查未经校准地混入分数。检查异常隔离为 error。
+
+内置检查覆盖排空后拒绝新调用、资源清理时活跃调用归零、清理错误、会话入口对象独立性。来源为真实作用域事件与会话绑定；没有相应行为证据时 skip。会话对象独立仅是结构检查，不能代替多窗口端到端并发测试。
+
+任务/策略检查由 TaskCase 显式声明产物与验收条件，内置工作区任务集已可执行；不会自动判断任意任务正确性。生命周期证据已采用 SQLite 持久化 outbox 和独立 collector，可跨进程归档与重放；容量管理仍待完善。新服务未将旧 telemetry/quality 全部替换。普通检查器不应主动改变被测业务状态；任务基准仅在隔离的试验目录显式运行策略，结果检查器保持只读约定。

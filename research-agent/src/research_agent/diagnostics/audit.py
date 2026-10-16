@@ -218,6 +218,8 @@ def audit(limit: int = 20, data_dir=None, telemetry_rep: dict | None = None) -> 
         for i in s["issues"]:
             issue_counts[i.split("×")[0].strip()] += 1
 
+    from research_agent.tools import get_registry
+    evaluations = get_registry().evaluate(artifacts={"telemetry": telemetry_rep})
     return {
         "sessions": sessions,
         "totals": {
@@ -233,6 +235,7 @@ def audit(limit: int = 20, data_dir=None, telemetry_rep: dict | None = None) -> 
         },
         "economy": econ,
         "issues": dict(issue_counts),
+        "evaluations": evaluations,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 

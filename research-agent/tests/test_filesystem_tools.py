@@ -1,4 +1,5 @@
 """Test filesystem tools: write, read, edit, glob, grep — all scoped to workspace."""
+import json
 import os
 import tempfile
 import shutil
@@ -25,10 +26,15 @@ def workspace():
 
 
 @pytest.fixture
-def state(workspace):
+def state(workspace, monkeypatch):
+    from research_agent import sandbox
+    monkeypatch.setattr(sandbox, "get_sandbox_config", lambda: sandbox.SandboxConfig(backend="local"))
     s = AgentState(user_input="test")
     s.workspace_dir = workspace
-    return s
+    try:
+        yield s
+    finally:
+        sandbox.end_run(s)
 
 
 def test_get_project_dir_uses_workspace(workspace, state):
@@ -55,7 +61,7 @@ def test_safe_path_blocks_escape(workspace):
 
 def test_file_write_creates_file(workspace, state):
     result = _handle_file_write(
-        {"path": "hello.txt", "content": "Hello World"},
+        {"expected_version": "absent", "path": "hello.txt", "content": "Hello World"},
         None, state, _mock_emit,
     )
     assert result.success
@@ -66,7 +72,7 @@ def test_file_write_creates_file(workspace, state):
 
 def test_file_write_subdirectory(workspace, state):
     result = _handle_file_write(
-        {"path": "sub/deep/file.py", "content": "print(1)"},
+        {"expected_version": "absent", "path": "sub/deep/file.py", "content": "print(1)"},
         None, state, _mock_emit,
     )
     assert result.success
@@ -110,8 +116,9 @@ def test_file_edit_replaces_unique_string(workspace, state):
     filepath = os.path.join(workspace, "config.py")
     with open(filepath, "w") as f:
         f.write("VERSION = '1.0'\nDEBUG = False\n")
+    version = _handle_file_read({"path": "config.py"}, None, state, _mock_emit).data["version"]
     result = _handle_file_edit(
-        {"path": "config.py", "old_string": "DEBUG = False", "new_string": "DEBUG = True"},
+        {"path": "config.py", "old_string": "DEBUG = False", "new_string": "DEBUG = True", "expected_version": version},
         None, state, _mock_emit,
     )
     assert result.success
@@ -126,8 +133,9 @@ def test_file_edit_fails_ambiguous(workspace, state):
     filepath = os.path.join(workspace, "dup.txt")
     with open(filepath, "w") as f:
         f.write("hello world\nhello world\n")
+    version = _handle_file_read({"path": "dup.txt"}, None, state, _mock_emit).data["version"]
     result = _handle_file_edit(
-        {"path": "dup.txt", "old_string": "hello world", "new_string": "bye"},
+        {"path": "dup.txt", "old_string": "hello world", "new_string": "bye", "expected_version": version},
         None, state, _mock_emit,
     )
     assert not result.success
@@ -177,6 +185,60 @@ def test_file_grep_finds_pattern(workspace, state):
     assert any("def bar" in c for c in contents)
 
 
+def test_file_grep_uses_rg_when_available(monkeypatch, workspace, state):
+    from research_agent.tools.builtin import filesystem as fs
+    os.makedirs(os.path.join(workspace, "src"), exist_ok=True)
+    with open(os.path.join(workspace, "src", "a.py"), "w", encoding="utf-8") as stream:
+        stream.write("\n\ndef foo():\n")
+    with open(os.path.join(workspace, "b.py"), "w", encoding="utf-8") as stream:
+        stream.write("\n" * 6 + "def bar():\n")
+    rg_out = "\n".join([
+        json.dumps({"type": "begin", "data": {}}),
+        json.dumps({"type": "match", "data": {
+            "path": {"text": ".\\src\\a.py"}, "line_number": 3,
+            "lines": {"text": "def foo():\n"}}}),
+        json.dumps({"type": "match", "data": {
+            "path": {"text": ".\\b.py"}, "line_number": 7,
+            "lines": {"text": "def bar():\n"}}}),
+        json.dumps({"type": "end", "data": {}}),
+    ])
+
+    class R:
+        returncode = 0
+        stdout = rg_out
+        stderr = ""
+
+    monkeypatch.setattr(fs.shutil, "which", lambda n: "rg" if n == "rg" else None)
+    monkeypatch.setattr(fs.subprocess, "run", lambda *a, **k: R())
+    res = fs._handle_file_grep({"pattern": r"def \w+", "include": "*.py"},
+                               None, state, _mock_emit)
+    assert res.success and res.data["count"] == 2
+    assert res.data["matches"][0] == {"file": "src/a.py", "line": 3, "content": "def foo():"}
+    assert res.data["matches"][1]["file"] == "b.py"
+
+
+def test_file_grep_falls_back_when_rg_errors(monkeypatch, workspace, state):
+    from research_agent.tools.builtin import filesystem as fs
+    with open(os.path.join(workspace, "code.py"), "w", encoding="utf-8") as f:
+        f.write("def foo():\n")
+
+    class R:
+        returncode = 2
+        stdout = ""
+        stderr = "regex parse error"
+
+    monkeypatch.setattr(fs.shutil, "which", lambda n: "rg")
+    monkeypatch.setattr(fs.subprocess, "run", lambda *a, **k: R())
+    res = fs._handle_file_grep({"pattern": r"def \w+", "include": "*.py"},
+                               None, state, _mock_emit)
+    assert res.success and res.data["count"] >= 1   # Python fallback found it
+
+
+def test_file_grep_invalid_regex_fails(workspace, state):
+    res = _handle_file_grep({"pattern": "("}, None, state, _mock_emit)
+    assert not res.success
+
+
 def test_shell_exec_runs_in_workspace(workspace, state):
     result = _handle_shell_exec(
         {"command": "echo hello>test_out.txt"},
@@ -213,7 +275,7 @@ def test_shell_exec_blocks_sudo(workspace, state):
 def test_write_then_read_roundtrip(workspace, state):
     content = "The quick brown fox\njumps over\nthe lazy dog."
     _handle_file_write(
-        {"path": "fox.txt", "content": content},
+        {"expected_version": "absent", "path": "fox.txt", "content": content},
         None, state, _mock_emit,
     )
     result = _handle_file_read(
@@ -228,7 +290,7 @@ def test_write_then_read_roundtrip(workspace, state):
 def test_workspace_isolation(workspace, state):
     """Files written in one workspace do not appear in another."""
     _handle_file_write(
-        {"path": "secret.txt", "content": "top secret"},
+        {"expected_version": "absent", "path": "secret.txt", "content": "top secret"},
         None, state, _mock_emit,
     )
     ws2 = tempfile.mkdtemp()
@@ -246,7 +308,7 @@ def test_workspace_isolation(workspace, state):
 
 def test_filename_with_spaces(workspace, state):
     _handle_file_write(
-        {"path": "my research notes.md", "content": "# Notes\nFindings here."},
+        {"expected_version": "absent", "path": "my research notes.md", "content": "# Notes\nFindings here."},
         None, state, _mock_emit,
     )
     filepath = os.path.join(workspace, "my research notes.md")

@@ -17,7 +17,7 @@ def fresh_registry():
     from research_agent.config import load_config, get_config_path
     cfg = load_config()
     cfg["plugins"] = {pid: {"enabled": True}
-                      for pid in ("filesystem", "shell", "subagent", "memory",
+                      for pid in ("filesystem", "shell", "subagent", "telemetry",
                                   "diagnostics", "mcp")}
     with open(get_config_path(), "w", encoding="utf-8") as fh:
         import yaml
@@ -30,7 +30,7 @@ def fresh_registry():
 def test_core_plugins_installed(fresh_registry):
     assert "filesystem" in fresh_registry.plugins
     assert "shell" in fresh_registry.plugins
-    assert "memory" in fresh_registry.plugins  # memory_tier_b enabled by default
+    assert "telemetry" in fresh_registry.plugins
     assert "subagent" in fresh_registry.plugins
 
 
@@ -64,11 +64,11 @@ def test_shell_plugin_marks_shell_dangerous(fresh_registry):
 
 
 def test_uninstall_plugin_removes_tools(fresh_registry):
-    assert "memorize" in fresh_registry
-    assert fresh_registry.uninstall_plugin("memory", force=True) is True
-    assert "memory" not in fresh_registry.plugins
-    assert "memorize" not in fresh_registry
-    assert "search_memory" not in fresh_registry
+    assert "usage_report" in fresh_registry
+    assert fresh_registry.uninstall_plugin("telemetry", force=True) is True
+    assert "telemetry" not in fresh_registry.plugins
+    assert "usage_report" not in fresh_registry
+    assert "usage_query" not in fresh_registry
     # other plugins unaffected
     assert "shell_exec" in fresh_registry
     assert "file_write" in fresh_registry
@@ -123,7 +123,7 @@ def test_cli_plugin_list_smoke(temp_data_dir, monkeypatch):
     res = runner.invoke(cli_mod.plugin, ["list"])
     assert res.exit_code == 0
     assert "filesystem" in res.output
-    assert "memory" in res.output
+    assert "plan" in res.output
     assert "shell" in res.output
 
 
@@ -132,14 +132,14 @@ def test_cli_plugin_disable_then_list(temp_data_dir, monkeypatch):
     from research_agent import cli as cli_mod
     from research_agent.tools import get_registry, is_plugin_enabled
     runner = CliRunner()
-    res = runner.invoke(cli_mod.plugin, ["disable", "memory"])
+    res = runner.invoke(cli_mod.plugin, ["disable", "telemetry"])
     assert res.exit_code == 0
-    assert is_plugin_enabled("memory") is False
+    assert is_plugin_enabled("telemetry") is False
     reg = get_registry()
-    # memory plugin disabled persists to config; re-enable via CLI
-    res2 = runner.invoke(cli_mod.plugin, ["enable", "memory"])
+    # telemetry plugin disabled persists to config; re-enable via CLI
+    res2 = runner.invoke(cli_mod.plugin, ["enable", "telemetry"])
     assert res2.exit_code == 0
-    assert is_plugin_enabled("memory") is True
+    assert is_plugin_enabled("telemetry") is True
 
 
 def test_cli_plugin_uninstall_core_rejected(temp_data_dir, monkeypatch):

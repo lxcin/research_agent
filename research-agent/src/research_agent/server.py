@@ -5,17 +5,40 @@ import asyncio
 import os
 import threading
 import queue
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from research_agent.agent import AgentState, run_agent
+from research_agent.agent import AgentState, run_agent_resilient as run_agent
 
 _active_states: dict[str, AgentState] = {}
+_active_lock = threading.Lock()
 
-app = FastAPI(title="PaperPilot API")
+@asynccontextmanager
+async def _lifespan(app):
+    from research_agent.tools import get_registry
+    manager = get_registry().background_tasks
+    manager.resume()
+    from research_agent.git_maintenance import resume as resume_git_maintenance
+    resume_git_maintenance()
+    from research_agent.checkpoint_events import resume as resume_snapshot_events
+    await asyncio.to_thread(resume_snapshot_events)
+    try:
+        yield
+    finally:
+        with _active_lock:
+            states = list(_active_states.values())
+        for state in states:
+            state._cancellation.cancel()
+            for pending in list(state._pending_confirms.values()):
+                pending["event"].set()
+        await asyncio.to_thread(manager.shutdown)
+
+
+app = FastAPI(title="PaperPilot API", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,11 +78,75 @@ class ChatRequest(BaseModel):
     workspace_dir: str = ""
     chat_id: str = ""
     config: ApiConfig | None = None
+    execution_id: str | None = None
+    isolate_session: bool | None = None
 
 
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+class UndoReviewRequest(BaseModel):
+    workspace_dir: str = ""
+    paths: list[str] | None = None
+    resolved: list[str] = Field(default_factory=list)
+
+
+class UndoApplyRequest(BaseModel):
+    workspace_dir: str = ""
+    review_token: str
+
+
+def _undo_workspace(chat_id, requested):
+    from research_agent.session_workspace import bound_session, canonical
+    from research_agent.review_baseline import baseline
+    try:
+        binding = bound_session(chat_id)
+        if binding:
+            if binding.archived:
+                raise ValueError("Restore the archived session before undo")
+            if requested and canonical(requested) not in {canonical(binding.project), canonical(binding.workspace)}:
+                raise ValueError("Workspace does not belong to this session")
+            workspace = binding.workspace
+        else:
+            workspace = requested
+        active = baseline(workspace, "active-turn") if workspace else {}
+        if not active or active.get("chat_id") != chat_id:
+            raise ValueError("No current turn snapshot belongs to this chat/workspace")
+        return workspace, active["ref"]
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/chats/{chat_id}/undo/review")
+async def review_chat_undo(chat_id: str, req: UndoReviewRequest):
+    from research_agent.rollback import review_undo
+    workspace, ref = _undo_workspace(chat_id, req.workspace_dir)
+    result = await asyncio.to_thread(review_undo, workspace, ref, req.paths, resolved=req.resolved)
+    if not result["success"]:
+        raise HTTPException(409, result)
+    return result
+
+
+@app.post("/api/chats/{chat_id}/undo/apply")
+async def apply_chat_undo(chat_id: str, req: UndoApplyRequest):
+    from research_agent.rollback import apply_undo
+    workspace, ref = _undo_workspace(chat_id, req.workspace_dir)
+    result = await asyncio.to_thread(apply_undo, workspace, review_token=req.review_token, expected_ref=ref)
+    if not result["success"]:
+        raise HTTPException(409, result)
+    return result
+
+
+@app.post("/api/chats/{chat_id}/undo/cancel")
+async def cancel_chat_undo(chat_id: str, req: UndoApplyRequest):
+    from research_agent.rollback import cancel_conflict
+    workspace, ref = _undo_workspace(chat_id, req.workspace_dir)
+    result = await asyncio.to_thread(cancel_conflict, workspace, review_token=req.review_token, expected_ref=ref)
+    if not result["success"]:
+        raise HTTPException(409, result)
+    return result
 
 
 @app.post("/api/chat")
@@ -101,10 +188,27 @@ async def chat(req: ChatRequest):
                 llm = LiteLLMProvider(model=model, api_key=api_key, api_base=api_base)
                 state = AgentState(user_input=req.message)
                 workspace = req.workspace_dir or ""
-                chat = req.chat_id or ""
-                _active_states[chat or "default"] = state
-                result = run_agent(req.message, llm, state, on_event=emit,
-                                   workspace_dir=workspace, chat_id=chat)
+                chat = req.chat_id or ("chat_" + uuid.uuid4().hex[:12] if req.isolate_session else "")
+                state.active_chat_id = chat
+                state.workspace_dir = workspace
+                from research_agent.execution import CancellationToken
+                token = CancellationToken()
+                execution_id = req.execution_id or uuid.uuid4().hex
+                with _active_lock:
+                    if execution_id in _active_states:
+                        raise RuntimeError("Execution already active")
+                    state._cancellation = token
+                    _active_states[execution_id] = state
+                emit("execution", {"execution_id": execution_id})
+                try:
+                    result = run_agent(req.message, llm, state, on_event=emit,
+                                       workspace_dir=workspace, chat_id=chat,
+                                       cancellation=token, execution_id=execution_id, isolate_session=req.isolate_session)
+                    if result.error:
+                        emit("error", {"text": result.error, "termination_reason": result.termination_reason})
+                finally:
+                    with _active_lock:
+                        _active_states.pop(execution_id, None)
 
                 # Chunks already streamed via _stream_response - don't re-emit
                 emit("done", {})
@@ -264,13 +368,17 @@ async def get_chat(chat_id: str, workspace: str = ""):
 async def delete_chat(chat_id: str, workspace: str = ""):
     from research_agent import project_manager as pm
     if workspace:
-        if not pm.delete_chat(workspace, chat_id):
+        if not pm.load_chat(workspace, chat_id):
             raise HTTPException(404, "Chat not found")
+        await close_chat_session(chat_id)
+        await asyncio.to_thread(pm.delete_chat, workspace, chat_id)
         return {"status": "deleted"}
     projects = pm.list_projects()
     for p in projects:
         ws = p.get("workspace_dir", "")
-        if ws and pm.delete_chat(ws, chat_id):
+        if ws and pm.load_chat(ws, chat_id):
+            await close_chat_session(chat_id)
+            await asyncio.to_thread(pm.delete_chat, ws, chat_id)
             return {"status": "deleted"}
     raise HTTPException(404, "Chat not found")
 
@@ -316,12 +424,81 @@ async def get_progress(workspace: str = ""):
 async def confirm_action(body: dict):
     confirm_id = body.get("confirm_id", "")
     approved = body.get("approved", False)
-    for state in _active_states.values():
+    with _active_lock:
+        states = list(_active_states.values())
+    for state in states:
         if confirm_id in state._pending_confirms:
             state._pending_confirms[confirm_id]["approved"] = approved
             state._pending_confirms[confirm_id]["event"].set()
             return {"status": "ok"}
     raise HTTPException(404, "Confirmation not found")
+
+
+@app.get("/api/executions/{execution_id}")
+async def inspect_execution(execution_id: str):
+    from research_agent.recovery import inspect_execution as inspect
+    try:
+        return await asyncio.to_thread(inspect, execution_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/executions/{execution_id}/cancel")
+async def cancel_execution(execution_id: str):
+    from research_agent.tools import get_registry
+    tasks = await asyncio.to_thread(get_registry().background_tasks.cancel, execution=execution_id)
+    with _active_lock:
+        state = _active_states.get(execution_id)
+        if state is None:
+            if not tasks:
+                raise HTTPException(404, "Execution not active")
+        else:
+            state._cancellation.cancel()
+            for pending in list(state._pending_confirms.values()):
+                pending["event"].set()
+    return {"status": "cancellation_requested", "execution_id": execution_id, "background_tasks": tasks}
+
+
+@app.get("/api/chats/{chat_id}/tasks")
+async def list_background_tasks(chat_id: str):
+    from research_agent.tools import get_registry
+    tasks = await asyncio.to_thread(get_registry().background_tasks.list, chat_id)
+    return {"tasks": tasks}
+
+
+@app.post("/api/chats/{chat_id}/tasks/{task_id}/cancel")
+async def cancel_background_task(chat_id: str, task_id: str):
+    from research_agent.tools import get_registry
+    tasks = await asyncio.to_thread(get_registry().background_tasks.cancel, chat=chat_id, task_id=task_id)
+    if not tasks:
+        raise HTTPException(404, "No active task in this session")
+    return {"status": "cancellation_requested", "task_id": task_id}
+
+
+@app.post("/api/chats/{chat_id}/close")
+async def close_chat_session(chat_id: str):
+    from research_agent.tools import get_registry
+    with _active_lock:
+        for state in _active_states.values():
+            if state.active_chat_id == chat_id:
+                state._cancellation.cancel()
+                for pending in list(state._pending_confirms.values()):
+                    pending["event"].set()
+    try:
+        await asyncio.to_thread(get_registry().close_session, chat_id, 10)
+    except (TimeoutError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"status": "closed", "chat_id": chat_id}
+
+
+@app.post("/api/chats/{chat_id}/reopen")
+async def reopen_chat_session(chat_id: str):
+    from research_agent.tools import get_registry
+    try:
+        get_registry().reopen_session(chat_id)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"status": "open", "chat_id": chat_id}
 
 
 @app.get("/api/diagnostics")

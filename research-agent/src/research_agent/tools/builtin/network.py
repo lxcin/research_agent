@@ -40,6 +40,14 @@ _PDF_SNIFF = b"%PDF-"
 _MAX_RESULTS_CAP = 10
 
 
+class _TransportFailure(str):
+    """Keep transport classification through existing backend fallback APIs."""
+
+
+def _http_failure(status, message):
+    return _TransportFailure(message) if status in (408, 429, 500, 502, 503, 504) else message
+
+
 def _web_cfg() -> dict:
     from research_agent.config import get_web_config
     return get_web_config()
@@ -142,7 +150,7 @@ def validate_url(url: str, cfg: dict | None = None) -> str | None:
     if not cfg.get("allow_private", False):
         ips = _resolve_ips(host)
         if not ips:
-            return f"Cannot resolve host '{host}'"
+            return _TransportFailure(f"Cannot resolve host '{host}'")
         # Loopback-only exception for local dev services (opencode-style local
         # access). Scoped strictly to loopback — other private ranges stay blocked.
         if cfg.get("allow_localhost", False) and _all_loopback(ips):
@@ -279,9 +287,13 @@ def _fetch(url: str, cfg: dict, method: str = "GET") -> tuple[dict, str | None]:
                         "body": body,
                     }, None
     except httpx.HTTPError as e:
-        return {}, f"HTTP error: {e}"
+        from research_agent.model_retry import retryable
+        message = f"HTTP error: {e}"
+        return {}, _TransportFailure(message) if retryable(e) else message
     except Exception as e:
-        return {}, f"Request failed: {e}"
+        from research_agent.model_retry import retryable
+        message = f"Request failed: {e}"
+        return {}, _TransportFailure(message) if retryable(e) else message
 
 
 def _decode(body: bytes, encoding: str) -> str:
@@ -301,7 +313,7 @@ def _fetch_direct(url: str, cfg: dict) -> tuple[dict | None, str | None]:
     if err:
         return None, err
     if info["status"] >= 400:
-        return None, f"HTTP {info['status']} for {info['url']}"
+        return None, _http_failure(info["status"], f"HTTP {info['status']} for {info['url']}")
     ctype = (info["content_type"] or "").split(";")[0].strip().lower()
     raw = info["body"]
     if ctype in _HTML_TYPES or (not ctype and b"<html" in raw[:2000].lower()):
@@ -338,7 +350,7 @@ def _fetch_via_jina(url: str, cfg: dict) -> tuple[str, str | None]:
     if ferr:
         return "", ferr
     if info["status"] >= 400:
-        return "", f"Jina Reader HTTP {info['status']}"
+        return "", _http_failure(info["status"], f"Jina Reader HTTP {info['status']}")
     return _decode(info["body"], info["encoding"]), None
 
 
@@ -374,10 +386,12 @@ def _handle_web_fetch(params: dict, llm, state, emit) -> ToolResult:
 
     min_chars = cfg.get("fetch_min_chars", 200)
     errors: list[str] = []
+    network_failed = False
     for backend in backends:
         if backend == "direct":
             payload, err = _fetch_direct(url, cfg)
             if err:
+                network_failed = network_failed or isinstance(err, _TransportFailure)
                 errors.append(f"direct: {err}")
                 emit("tool", {"tool": "web_fetch", "status": "fallback",
                               "backend": "direct", "error": err[:120]})
@@ -392,6 +406,7 @@ def _handle_web_fetch(params: dict, llm, state, emit) -> ToolResult:
         elif backend == "jina":
             text, err = _fetch_via_jina(url, cfg)
             if err:
+                network_failed = network_failed or isinstance(err, _TransportFailure)
                 errors.append(f"jina: {err}")
                 emit("tool", {"tool": "web_fetch", "status": "fallback",
                               "backend": "jina", "error": err[:120]})
@@ -408,7 +423,8 @@ def _handle_web_fetch(params: dict, llm, state, emit) -> ToolResult:
 
     emit("tool", {"tool": "web_fetch", "status": "error",
                   "error": "; ".join(errors)[:150]})
-    return ToolResult.fail("Fetch failed on all backends: " + "; ".join(errors))
+    detail = "Fetch failed on all backends: " + "; ".join(errors)
+    return ToolResult.network_error(detail) if network_failed else ToolResult.fail(detail)
 
 
 # ── Tool: web_search (provider abstraction) ──
@@ -558,6 +574,7 @@ def _handle_web_search(params: dict, llm, state, emit) -> ToolResult:
     emit("tool", {"tool": "web_search", "status": "start",
                   "providers": providers, "query": query[:120]})
     errors: list[str] = []
+    network_failed = False
     for provider in providers:
         fn = _PROVIDERS.get(provider)
         if fn is None:
@@ -566,9 +583,12 @@ def _handle_web_search(params: dict, llm, state, emit) -> ToolResult:
         try:
             results, err = fn(query, cfg)
         except Exception as e:
+            from research_agent.model_retry import retryable
+            network_failed = network_failed or retryable(e)
             errors.append(f"{provider}: {e}")
             continue
         if err:
+            network_failed = network_failed or isinstance(err, _TransportFailure)
             errors.append(f"{provider}: {err}")
             emit("tool", {"tool": "web_search", "status": "fallback",
                           "provider": provider, "error": err[:120]})
@@ -580,7 +600,8 @@ def _handle_web_search(params: dict, llm, state, emit) -> ToolResult:
 
     emit("tool", {"tool": "web_search", "status": "error",
                   "error": "; ".join(errors)[:120]})
-    return ToolResult.fail("Search failed on all backends: " + "; ".join(errors))
+    detail = "Search failed on all backends: " + "; ".join(errors)
+    return ToolResult.network_error(detail) if network_failed else ToolResult.fail(detail)
 
 
 # ── Tool definitions ──

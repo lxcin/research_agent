@@ -9,6 +9,7 @@ description = "A general-purpose personal assistant agent harness with a replace
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1",
+    "jsonschema>=4.18",
     "litellm>=1.50",
     "fastapi>=0.110",
     "uvicorn>=0.27",
@@ -21,10 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Optional: semantic memory embedding layer (memory/vector.py). Falls back to
-# keyword search when unavailable.
+# Optional: episodic-memory embedding layer (research_agent/embedding.py). Falls
+# back to jieba/keyword recall when unavailable.
 vector = [
-    "chromadb>=0.5",
     "sentence-transformers>=2.0",
 ]
 # Optional: document extraction for the network plugin (web_fetch).
@@ -33,6 +33,15 @@ vector = [
 web = [
     "trafilatura>=1.6",
     "pypdf>=4.0",
+]
+# Optional: attachment parsing (research_agent.attachments).
+# Pillow = image downscale/compress; the rest parse Office documents to text.
+attach = [
+    "Pillow>=10.0",
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "python-pptx>=0.6",
 ]
 dev = [
     "pytest>=8.0",

@@ -1,42 +1,39 @@
-"""Tool parameter validation — catches LLM malformed calls before dispatch."""
+"""Schema-driven, offline-only tool parameter validation."""
+from jsonschema import Draft202012Validator
 
 
-TOOL_REQUIRED_PARAMS = {
-    "shell_exec":    ["command"],
-    "file_write":    ["path"],
-    "file_read":     ["path"],
-    "file_edit":     ["path", "old_string", "new_string"],
-    "file_grep":     ["pattern"],
-    "file_glob":     ["pattern"],
-    "check_tasks":   [],
-    "spawn_subagent": ["subtasks"],
-    "web_fetch":     ["url"],
-    "web_search":    ["query"],
-    "record_experience": ["section", "text"],
-    "classify_experience": ["text"],
-    "propose_skill": ["name", "description", "triggers", "body"],
-    "list_experience": [],
-    "list_skills": [],
-    "usage_report": [],
-    "usage_query": ["trace_id"],
-}
+def check_schema(schema):
+    Draft202012Validator.check_schema(schema)
+    def walk(value):
+        if isinstance(value, dict):
+            for key in ("$ref", "$dynamicRef"):
+                if key in value and not value[key].startswith("#"):
+                    raise ValueError("External schema references are not supported")
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+    walk(schema)
 
 
-def validate_tool_params(name: str, params: dict) -> str | None:
-    """Check that required params exist and are non-empty. Returns error message or None."""
-    required = TOOL_REQUIRED_PARAMS.get(name)
-    if required is None:
-        return None  # unknown tool, let dispatch handle it
+def validate_schema_params(schema, params):
+    if not isinstance(params, dict):
+        return "Tool parameters must be an object"
+    errors = sorted(Draft202012Validator(schema).iter_errors(params), key=lambda error: str(list(error.path)))
+    if not errors:
+        return None
+    error = errors[0]
+    path = ".".join(str(item) for item in error.path) or "$"
+    return f"Invalid parameter {path}: {error.message}"
 
-    for key in required:
-        val = params.get(key)
-        if val is None or (isinstance(val, str) and not val.strip()):
-            return f"Missing required parameter: {key}"
 
-    # Type checks
-    if name == "subagent" or name == "spawn_subagent":
-        subtasks = params.get("subtasks", [])
-        if not isinstance(subtasks, list) or len(subtasks) == 0:
-            return "subtasks must be a non-empty list"
-
-    return None
+def validate_tool_params(name, params, registry=None):
+    """Compatibility adapter; no hardcoded tool-specific requirements."""
+    if registry is None:
+        from research_agent.tools import get_registry
+        registry = get_registry()
+    tool = getattr(registry, "tools", {}).get(name)
+    if tool is None:
+        return None if isinstance(params, dict) else "Tool parameters must be an object"
+    return validate_schema_params(tool.parameters, params)

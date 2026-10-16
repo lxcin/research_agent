@@ -98,19 +98,130 @@ def test_run_command_timeout_reported(tmp_path):
     assert res["success"] is False and res.get("error") == "timeout"
 
 
-def test_shell_exec_handler_routes_through_sandbox(monkeypatch, tmp_path):
+def test_shell_exec_handler_routes_through_session(monkeypatch, tmp_path):
     from research_agent.tools.builtin import filesystem as fs
     captured = {}
 
-    def fake_run_command(command, workdir, timeout, cfg=None):
-        captured.update(command=command, workdir=workdir, timeout=timeout)
-        return {"success": True, "backend": "docker", "returncode": 0,
-                "stdout": "ok", "stderr": "", "warning": None}
+    class FakeSession:
+        backend = "docker"
 
-    monkeypatch.setattr(fs, "run_command", fake_run_command)
-    state = types.SimpleNamespace(workspace_dir=str(tmp_path))
+        def exec(self, command, timeout):
+            captured.update(command=command, timeout=timeout)
+            return {"success": True, "backend": "docker", "returncode": 0,
+                    "stdout": "ok", "stderr": "", "warning": None}
+
+    monkeypatch.setattr(fs, "get_session",
+                        lambda state, workdir, cfg=None: FakeSession())
+    state = types.SimpleNamespace(workspace_dir=str(tmp_path), caps={})
     events = []
     res = fs._handle_shell_exec({"command": "echo ok"}, None, state, lambda e, d: events.append(e))
     assert res.success and res.data["backend"] == "docker"
-    assert captured["workdir"] == str(tmp_path)
+    assert captured["command"] == "echo ok"
     assert any(e == "tool" for e in events)
+
+
+# ── Session lifecycle (session-scoped, not per-command) ──
+
+class _Completed:
+    def __init__(self, rc=0, out="", err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+def _docker_fake(calls):
+    def fake_run(argv, *a, **k):
+        calls.append(argv)
+        if len(argv) > 1 and argv[1] == "run":
+            return _Completed(0, "cid")
+        if len(argv) > 1 and argv[1] == "exec":
+            return _Completed(0, "ok")
+        if len(argv) > 1 and argv[1] == "inspect":
+            return _Completed(0, "true")
+        return _Completed(0, "")
+    return fake_run
+
+
+def test_session_reuses_one_container_for_many_commands(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(sandbox, "docker_available", lambda *a, **k: True)
+    monkeypatch.setattr(sandbox.subprocess, "run", _docker_fake(calls))
+    cfg = sandbox.SandboxConfig(backend="docker", session="ephemeral")
+    sess = sandbox.create_session(str(tmp_path), cfg)
+    assert sess.exec("echo a", 5)["success"]
+    assert sess.exec("echo b", 5)["success"]
+    runs = [c for c in calls if len(c) > 1 and c[1] == "run"]
+    execs = [c for c in calls if len(c) > 1 and c[1] == "exec"]
+    assert len(runs) == 1        # container started once
+    assert len(execs) == 2       # both commands via docker exec
+    sess.close()
+
+
+def test_get_session_reuses_within_run_and_end_run_closes(monkeypatch, tmp_path):
+    from research_agent.models import AgentState
+    calls = []
+    monkeypatch.setattr(sandbox, "docker_available", lambda *a, **k: True)
+    monkeypatch.setattr(sandbox.subprocess, "run", _docker_fake(calls))
+    state = AgentState(user_input="t")
+    state.workspace_dir = str(tmp_path)
+    cfg = sandbox.SandboxConfig(backend="docker", session="ephemeral")
+    s1 = sandbox.get_session(state, str(tmp_path), cfg)
+    s2 = sandbox.get_session(state, str(tmp_path), cfg)
+    assert s1 is s2                              # reused within the run
+    s1.exec("echo hi", 5)
+    sandbox.end_run(state)
+    assert any(len(c) > 1 and c[1] == "rm" for c in calls)  # container torn down
+
+
+def test_persistent_session_is_rejected():
+    import pytest
+    with pytest.raises(ValueError, match="Only ephemeral"):
+        sandbox.SandboxConfig(session="persistent")
+
+
+def test_legacy_config_migrates_to_run_scoped_session(monkeypatch, caplog):
+    from research_agent import config
+    monkeypatch.setattr(config, "load_config", lambda: {
+        "shell": {"session": "persistent", "idle_timeout": 1800}})
+    assert sandbox.get_sandbox_config().session == "ephemeral"
+    assert "retired" in caplog.text
+
+
+def test_ephemeral_session_not_shared_across_runs(monkeypatch, tmp_path):
+    from research_agent.models import AgentState
+    monkeypatch.setattr(sandbox, "docker_available", lambda *a, **k: True)
+    monkeypatch.setattr(sandbox.subprocess, "run", _docker_fake([]))
+    cfg = sandbox.SandboxConfig(backend="docker", session="ephemeral")
+    st1 = AgentState(user_input="t")
+    st1.workspace_dir = str(tmp_path)
+    st2 = AgentState(user_input="t")
+    st2.workspace_dir = str(tmp_path)
+    a = sandbox.get_session(st1, str(tmp_path), cfg)
+    sandbox.end_run(st1)
+    b = sandbox.get_session(st2, str(tmp_path), cfg)
+    assert a is not b                            # fresh session per run
+    sandbox.end_run(st2)
+
+
+def test_session_start_fails_when_docker_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setattr(sandbox, "docker_available", lambda *a, **k: False)
+    cfg = sandbox.SandboxConfig(backend="docker")
+    sess = sandbox.create_session(str(tmp_path), cfg)
+    res = sess.exec("echo x", 5)
+    assert res["success"] is False and res["backend"] == "docker"
+    assert "docker" in (res.get("error") or "").lower()
+
+
+def test_direct_docker_exec_timeout_stops_container_before_reuse(monkeypatch, tmp_path):
+    import subprocess
+    calls = []
+    fake = _docker_fake(calls)
+    def run(argv, **kwargs):
+        if argv[1] == "exec":
+            raise subprocess.TimeoutExpired(argv, 1)
+        return fake(argv, **kwargs)
+    monkeypatch.setattr(sandbox, "docker_available", lambda *args: True)
+    monkeypatch.setattr(sandbox.subprocess, "run", run)
+    session = sandbox.create_session(str(tmp_path), sandbox.SandboxConfig(backend="docker"))
+    result = session.exec("sleep 60", 1)
+    assert result["error"] == "timeout" and session._closed
+    assert any(argv[1] == "rm" for argv in calls)
+    assert session._slot_release is None
